@@ -20,284 +20,15 @@ static struct EnvVar env_vars[MAX_ENVS];
 static int env_count = 0;
 static char *history[HISTORY_MAX];
 static int history_count = 0;
-static int history_pos = 0;
-static char cwd[MAXPATHLEN] = "/";
+static char current_dir[MAXPATHLEN] = "/";
+static int exit_status = 0;
 
-/* Overview:
- *   Parse the next token from the string at s.
- *
- * Post-Condition:
- *   Set '*p1' to the beginning of the token and '*p2' to just past the token.
- *   Return:
- *     - 0 if the end of string is reached.
- *     - '<' for < (stdin redirection).
- *     - '>' for > (stdout redirection).
- *     - '|' for | (pipe).
- *     - 'w' for a word (command, argument, or file name).
- *
- *   The buffer is modified to turn the spaces after words into zero bytes ('\0'), so that the
- *   returned token is a null-terminated string.
- */
-int _gettoken(char *s, char **p1, char **p2) {
-	*p1 = 0;
-	*p2 = 0;
-	if (s == 0) {
-		return 0;
-	}
-
-	while (strchr(WHITESPACE, *s)) {
-		*s++ = 0;
-	}
-	if (*s == 0) {
-		return 0;
-	}
-
-	if (strchr(SYMBOLS, *s)) {
-		int t = *s;
-		*p1 = s;
-		*s++ = 0;
-		*p2 = s;
-		return t;
-	}
-
-	*p1 = s;
-	while (*s && !strchr(WHITESPACE SYMBOLS, *s)) {
-		s++;
-	}
-	*p2 = s;
-	return 'w';
-}
-
-int gettoken(char *s, char **p1) {
-	static int c, nc;
-	static char *np1, *np2;
-
-	if (s) {
-		nc = _gettoken(s, &np1, &np2);
-		return 0;
-	}
-	c = nc;
-	*p1 = np1;
-	nc = _gettoken(np2, &np1, &np2);
-	return c;
-}
-
-#define MAXARGS 128
-
-int parsecmd(char **argv, int *rightpipe) {
-	int argc = 0;
-	while (1) {
-		char *t;
-		int fd, r;
-		int c = gettoken(0, &t);
-		switch (c) {
-		case 0:
-			return argc;
-		case 'w':
-			if (argc >= MAXARGS) {
-				debugf("too many arguments\n");
-				exit();
-			}
-			argv[argc++] = t;
-			break;
-		case '<':
-			if (gettoken(0, &t) != 'w') {
-				debugf("syntax error: < not followed by word\n");
-				exit();
-			}
-			// Open 't' for reading, dup it onto fd 0, and then close the original fd.
-			// If the 'open' function encounters an error,
-			// utilize 'debugf' to print relevant messages,
-			// and subsequently terminate the process using 'exit'.
-			/* Exercise 6.5: Your code here. (1/3) */
-			fd = open(t, O_RDONLY);
-			if (fd < 0) {
-				debugf("failed to open '%s'\n", t);
-				exit();
-			}
-			dup(fd, 0);
-			close(fd);
-			// user_panic("< redirection not implemented");
-
-			break;
-		case '>':
-			if (gettoken(0, &t) != 'w') {
-				debugf("syntax error: > not followed by word\n");
-				exit();
-			}
-			// Open 't' for writing, create it if not exist and trunc it if exist, dup
-			// it onto fd 1, and then close the original fd.
-			// If the 'open' function encounters an error,
-			// utilize 'debugf' to print relevant messages,
-			// and subsequently terminate the process using 'exit'.
-			/* Exercise 6.5: Your code here. (2/3) */
-			fd = open(t, O_WRONLY);
-			if (fd < 0) {
-				debugf("failed to open '%s'\n", t);
-				exit();
-			}
-			dup(fd, 1);
-			close(fd);
-			// user_panic("> redirection not implemented");
-
-			break;
-		case '|':;
-			/*
-			 * First, allocate a pipe.
-			 * Then fork, set '*rightpipe' to the returned child envid or zero.
-			 * The child runs the right side of the pipe:
-			 * - dup the read end of the pipe onto 0
-			 * - close the read end of the pipe
-			 * - close the write end of the pipe
-			 * - and 'return parsecmd(argv, rightpipe)' again, to parse the rest of the
-			 *   command line.
-			 * The parent runs the left side of the pipe:
-			 * - dup the write end of the pipe onto 1
-			 * - close the write end of the pipe
-			 * - close the read end of the pipe
-			 * - and 'return argc', to execute the left of the pipeline.
-			 */
-			int p[2];
-			/* Exercise 6.5: Your code here. (3/3) */
-			pipe(p);
-			*rightpipe = fork();
-			if (*rightpipe == 0) {
-				dup(p[0], 0);
-				close(p[0]);
-				close(p[1]);
-				return parsecmd(argv, rightpipe);
-			}  else if (*rightpipe > 0) {
-				dup(p[1], 1);
-				close(p[1]);
-				close(p[0]);
-				return argc;
-			}
-			// user_panic("| not implemented");
-
-			break;
-		}
-	}
-
-	return argc;
-}
-
-void runcmd(char *s) {
-	gettoken(s, 0);
-
-	char *argv[MAXARGS];
-	int rightpipe = 0;
-	int argc = parsecmd(argv, &rightpipe);
-	if (argc == 0) {
-		return;
-	}
-	argv[argc] = 0;
-
-	int child = spawn(argv[0], argv);
-	close_all();
-	if (child >= 0) {
-		wait(child);
-	} else {
-		debugf("spawn %s: %d\n", argv[0], child);
-	}
-	if (rightpipe) {
-		wait(rightpipe);
-	}
-	exit();
-}
-
-void readline(char *buf, u_int n) {
-	int r;
-	for (int i = 0; i < n; i++) {
-		if ((r = read(0, buf + i, 1)) != 1) {
-			if (r < 0) {
-				debugf("read error: %d\n", r);
-			}
-			exit();
-		}
-		if (buf[i] == '\b' || buf[i] == 0x7f) {
-			if (i > 0) {
-				i -= 2;
-			} else {
-				i = -1;
-			}
-			if (buf[i] != '\b') {
-				printf("\b");
-			}
-		}
-		if (buf[i] == '\r' || buf[i] == '\n') {
-			buf[i] = 0;
-			return;
-		}
-	}
-	debugf("line too long\n");
-	while ((r = read(0, buf, 1)) == 1 && buf[0] != '\r' && buf[0] != '\n') {
-		;
-	}
-	buf[0] = 0;
-}
-
-char buf[1024];
-
-void usage(void) {
-	printf("usage: sh [-ix] [script-file]\n");
-	exit();
-}
-
-int main(int argc, char **argv) {
-	int r;
-	int interactive = iscons(0);
-	int echocmds = 0;
-	printf("\n:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\n");
-	printf("::                                                         ::\n");
-	printf("::                     MOS Shell 2024                      ::\n");
-	printf("::                                                         ::\n");
-	printf(":::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\n");
-	ARGBEGIN {
-	case 'i':
-		interactive = 1;
-		break;
-	case 'x':
-		echocmds = 1;
-		break;
-	default:
-		usage();
-	}
-	ARGEND
-
-	if (argc > 1) {
-		usage();
-	}
-	if (argc == 1) {
-		close(0);
-		if ((r = open(argv[0], O_RDONLY)) < 0) {
-			user_panic("open %s: %d", argv[0], r);
-		}
-		user_assert(r == 0);
-	}
-	for (;;) {
-		if (interactive) {
-			printf("\n$ ");
-		}
-		readline(buf, sizeof buf);
-
-		if (buf[0] == '#') {
-			continue;
-		}
-		if (echocmds) {
-			printf("# %s\n", buf);
-		}
-		if ((r = fork()) < 0) {
-			user_panic("fork: %d", r);
-		}
-		if (r == 0) {
-			runcmd(buf);
-			exit();
-		} else {
-			wait(r);
-		}
-	}
-	return 0;
-}
+void normalize_path(char *path);
+void resolve_path(const char *path, const char *cwd, char *result);
+void runcmd(char *s);
+void runcmd_multi(char *s);
+char *expand_vars(char *str);
+void save_history(const char *cmd);
 
 int builtin_cd(int argc, char **argv) {
     char path[MAXPATHLEN];
@@ -311,7 +42,7 @@ int builtin_cd(int argc, char **argv) {
     if (argc == 1) {
         strcpy(path, "/");
     } else {
-        resolve_path(argv[1], cwd, path);
+        resolve_path(argv[1], current_dir, path);
     }
     
     if (stat(path, &st) < 0) {
@@ -324,7 +55,7 @@ int builtin_cd(int argc, char **argv) {
         return 1;
     }
     
-    strcpy(cwd, path);
+    strcpy(current_dir, path);
     return 0;
 }
 
@@ -333,7 +64,7 @@ int builtin_pwd(int argc, char **argv) {
         printf("pwd: expected 0 arguments; got %d\n", argc - 1);
         return 2;
     }
-    printf("%s\n", cwd);
+    printf("%s\n", current_dir);
     return 0;
 }
 
@@ -361,13 +92,26 @@ int builtin_declare(int argc, char **argv) {
         return 0;
     }
     
-    char *name = argv[arg_start];
-    char *value = strchr(name, '=');
-    if (value) {
-        *value = '\0';
-        value++;
+    char name[ENV_NAME_MAX + 1];
+    char value[ENV_VAL_MAX + 1];
+    const char *eq = strchr(argv[arg_start], '=');  // 使用 const char*
+    
+    if (eq) {
+        int name_len = eq - argv[arg_start];
+        if (name_len > ENV_NAME_MAX) name_len = ENV_NAME_MAX;
+        memcpy(name, argv[arg_start], name_len);
+        name[name_len] = '\0';
+        
+        int val_len = strlen(eq + 1);
+        if (val_len > ENV_VAL_MAX) val_len = ENV_VAL_MAX;
+        memcpy(value, eq + 1, val_len);
+        value[val_len] = '\0';
     } else {
-        value = "";
+        int name_len = strlen(argv[arg_start]);
+        if (name_len > ENV_NAME_MAX) name_len = ENV_NAME_MAX;
+        memcpy(name, argv[arg_start], name_len);
+        name[name_len] = '\0';
+        value[0] = '\0';
     }
     
     int found = -1;
@@ -380,7 +124,6 @@ int builtin_declare(int argc, char **argv) {
     
     if (found >= 0) {
         if (env_vars[found].is_readonly) {
-            printf("declare: %s: readonly variable\n", name);
             return 1;
         }
         strcpy(env_vars[found].value, value);
@@ -388,7 +131,6 @@ int builtin_declare(int argc, char **argv) {
         if (is_readonly) env_vars[found].is_readonly = 1;
     } else {
         if (env_count >= MAX_ENVS) {
-            printf("declare: too many environment variables\n");
             return 1;
         }
         strcpy(env_vars[env_count].name, name);
@@ -403,14 +145,12 @@ int builtin_declare(int argc, char **argv) {
 
 int builtin_unset(int argc, char **argv) {
     if (argc != 2) {
-        printf("unset: expected 1 argument\n");
         return 1;
     }
     
     for (int i = 0; i < env_count; i++) {
         if (strcmp(env_vars[i].name, argv[1]) == 0) {
             if (env_vars[i].is_readonly) {
-                printf("unset: %s: cannot unset: readonly variable\n", argv[1]);
                 return 1;
             }
             for (int j = i; j < env_count - 1; j++) {
@@ -429,72 +169,170 @@ int builtin_exit(int argc, char **argv) {
 }
 
 int builtin_history(int argc, char **argv) {
-    for (int i = 0; i < history_count; i++) {
-        printf("%s\n", history[i]);
+    int fd = open("/.mos_history", O_RDONLY);
+    if (fd >= 0) {
+        char buf[MAX_INPUT];
+        int n;
+        while ((n = read(fd, buf, sizeof(buf) - 1)) > 0) {
+            buf[n] = '\0';
+            printf("%s", buf);
+        }
+        close(fd);
     }
     return 0;
 }
 
-void readline_advanced(char *buf, u_int n) {
+void save_history(const char *cmd) {
+    if (strlen(cmd) == 0) return;
+    
+    if (history_count < HISTORY_MAX) {
+        history[history_count] = (char*)cmd;
+        history_count++;
+    }
+    
+    int fd = open("/.mos_history", O_WRONLY | O_CREAT);
+    if (fd >= 0) {
+        lseek(fd, 0, SEEK_END);
+        write(fd, cmd, strlen(cmd));
+        write(fd, "\n", 1);
+        close(fd);
+    }
+}
+
+char *expand_vars(char *str) {
+    static char result[MAX_INPUT];
+    char *dst = result;
+    char *src = str;
+    
+    while (*src && dst - result < MAX_INPUT - 1) {
+        if (*src == '$' && ((src[1] >= 'a' && src[1] <= 'z') || (src[1] >= 'A' && src[1] <= 'Z'))) {
+            src++;
+            char varname[ENV_NAME_MAX + 1];
+            int i = 0;
+            while (((*src >= 'a' && *src <= 'z') || (*src >= 'A' && *src <= 'Z') || 
+                   (*src >= '0' && *src <= '9') || *src == '_') && i < ENV_NAME_MAX) {
+                varname[i++] = *src++;
+            }
+            varname[i] = '\0';
+            
+            for (int j = 0; j < env_count; j++) {
+                if (strcmp(env_vars[j].name, varname) == 0) {
+                    strcpy(dst, env_vars[j].value);
+                    dst += strlen(env_vars[j].value);
+                    break;
+                }
+            }
+        } else if (*src == '`') {
+            src++;
+            char cmd[MAX_INPUT];
+            int i = 0;
+            while (*src && *src != '`' && i < MAX_INPUT - 1) {
+                cmd[i++] = *src++;
+            }
+            cmd[i] = '\0';
+            if (*src == '`') src++;
+            
+            int p[2];
+            if (pipe(p) == 0) {
+                int pid = fork();
+                if (pid == 0) {
+                    close(p[0]);
+                    dup(p[1], 1);
+                    close(p[1]);
+                    runcmd(cmd);
+                    exit();
+                } else if (pid > 0) {
+                    close(p[1]);
+                    char output[MAX_INPUT];
+                    int n = read(p[0], output, MAX_INPUT - 1);
+                    if (n > 0) {
+                        output[n] = '\0';
+                        if (n > 0 && output[n-1] == '\n') {
+                            output[n-1] = '\0';
+                        }
+                        strcpy(dst, output);
+                        dst += strlen(output);
+                    }
+                    close(p[0]);
+                    wait(pid);
+                }
+            }
+        } else {
+            *dst++ = *src++;
+        }
+    }
+    *dst = '\0';
+    return result;
+}
+
+void readline(char *buf, u_int n) {
     int pos = 0;
     int len = 0;
-    int hist_index = history_count;
-    char temp[MAX_INPUT];
+    int hist_idx = -1;
+    char c;
+    int r;
     
+    pos = len = 0;
+    hist_idx = history_count;
     buf[0] = '\0';
     
     while (1) {
-        int c = syscall_cgetc();
+        if ((r = read(0, &c, 1)) != 1) {
+            if (r < 0) {
+                debugf("read error: %d\n", r);
+            }
+            exit();
+        }
         
         if (c == '\x1b') {
-            c = syscall_cgetc();
-            if (c == '[') {
-                c = syscall_cgetc();
-                switch (c) {
-                    case 'A':
-                        if (hist_index > 0) {
-                            hist_index--;
-                            while (pos > 0) {
-                                printf("\b \b");
+            if (read(0, &c, 1) == 1 && c == '[') {
+                if (read(0, &c, 1) == 1) {
+                    switch (c) {
+                        case 'A':
+                            if (hist_idx > 0) {
+                                hist_idx--;
+                                while (pos > 0) {
+                                    printf("\b \b");
+                                    pos--;
+                                }
+                                strcpy(buf, history[hist_idx]);
+                                printf("%s", buf);
+                                pos = len = strlen(buf);
+                            }
+                            break;
+                        case 'B':
+                            if (hist_idx < history_count - 1) {
+                                hist_idx++;
+                                while (pos > 0) {
+                                    printf("\b \b");
+                                    pos--;
+                                }
+                                strcpy(buf, history[hist_idx]);
+                                printf("%s", buf);
+                                pos = len = strlen(buf);
+                            } else if (hist_idx == history_count - 1) {
+                                hist_idx++;
+                                while (pos > 0) {
+                                    printf("\b \b");
+                                    pos--;
+                                }
+                                buf[0] = '\0';
+                                pos = len = 0;
+                            }
+                            break;
+                        case 'C':
+                            if (pos < len) {
+                                printf("%c", buf[pos]);
+                                pos++;
+                            }
+                            break;
+                        case 'D':
+                            if (pos > 0) {
+                                printf("\b");
                                 pos--;
                             }
-                            strcpy(buf, history[hist_index]);
-                            printf("%s", buf);
-                            pos = len = strlen(buf);
-                        }
-                        break;
-                    case 'B':
-                        if (hist_index < history_count - 1) {
-                            hist_index++;
-                            while (pos > 0) {
-                                printf("\b \b");
-                                pos--;
-                            }
-                            strcpy(buf, history[hist_index]);
-                            printf("%s", buf);
-                            pos = len = strlen(buf);
-                        } else if (hist_index == history_count - 1) {
-                            hist_index++;
-                            while (pos > 0) {
-                                printf("\b \b");
-                                pos--;
-                            }
-                            buf[0] = '\0';
-                            pos = len = 0;
-                        }
-                        break;
-                    case 'C':
-                        if (pos < len) {
-                            printf("%c", buf[pos]);
-                            pos++;
-                        }
-                        break;
-                    case 'D':
-                        if (pos > 0) {
-                            printf("\b");
-                            pos--;
-                        }
-                        break;
+                            break;
+                    }
                 }
             }
         } else if (c == '\x01') {
@@ -584,6 +422,7 @@ void readline_advanced(char *buf, u_int n) {
                 }
                 buf[pos] = c;
                 len++;
+                buf[len] = '\0';
                 for (int i = pos; i < len; i++) {
                     printf("%c", buf[i]);
                 }
@@ -596,243 +435,85 @@ void readline_advanced(char *buf, u_int n) {
     }
 }
 
-void save_history(const char *cmd) {
-    if (strlen(cmd) == 0) return;
-    
-    int fd = open("/.mos_history", O_WRONLY | O_CREAT);
-    if (fd >= 0) {
-        seek(fd, 0);
-        char buf[MAX_INPUT];
-        int lines = 0;
-        int n;
-        
-        close(fd);
-        fd = open("/.mos_history", O_RDONLY);
-        if (fd >= 0) {
-            char temp[HISTORY_MAX][MAX_INPUT];
-            while ((n = readline_from_fd(fd, buf, MAX_INPUT)) > 0 && lines < HISTORY_MAX - 1) {
-                strcpy(temp[lines++], buf);
-            }
-            close(fd);
-            
-            fd = open("/.mos_history", O_WRONLY | O_TRUNC);
-            if (fd >= 0) {
-                for (int i = 0; i < lines; i++) {
-                    write(fd, temp[i], strlen(temp[i]));
-                    write(fd, "\n", 1);
-                }
-            }
-        }
-        
-        write(fd, cmd, strlen(cmd));
-        write(fd, "\n", 1);
-        close(fd);
+int _gettoken(char *s, char **p1, char **p2) {
+    *p1 = 0;
+    *p2 = 0;
+    if (s == 0) {
+        return 0;
     }
     
-    if (history_count < HISTORY_MAX) {
-        history[history_count] = malloc(strlen(cmd) + 1);
-        strcpy(history[history_count], cmd);
-        history_count++;
-    } else {
-        free(history[0]);
-        for (int i = 0; i < HISTORY_MAX - 1; i++) {
-            history[i] = history[i + 1];
-        }
-        history[HISTORY_MAX - 1] = malloc(strlen(cmd) + 1);
-        strcpy(history[HISTORY_MAX - 1], cmd);
+    while (strchr(WHITESPACE, *s)) {
+        *s++ = 0;
     }
+    if (*s == 0) {
+        return 0;
+    }
+    
+    if (*s == '#') {
+        *s = 0;
+        return 0;
+    }
+    
+    if (*s == '>' && *(s+1) == '>') {
+        *p1 = s;
+        *s++ = 0;
+        *s++ = 0;
+        *p2 = s;
+        return '>';
+    }
+    
+    if (*s == '&' && *(s+1) == '&') {
+        *p1 = s;
+        *s++ = 0;
+        *s++ = 0;
+        *p2 = s;
+        return '&';
+    }
+    
+    if (*s == '|' && *(s+1) == '|') {
+        *p1 = s;
+        *s++ = 0;
+        *s++ = 0;
+        *p2 = s;
+        return 'o';
+    }
+    
+    if (strchr(SYMBOLS, *s)) {
+        int t = *s;
+        *p1 = s;
+        *s++ = 0;
+        *p2 = s;
+        return t;
+    }
+    
+    *p1 = s;
+    while (*s && !strchr(WHITESPACE SYMBOLS, *s)) {
+        s++;
+    }
+    *p2 = s;
+    return 'w';
 }
 
-char *expand_vars(char *str) {
-    static char result[MAX_INPUT];
-    char *dst = result;
-    char *src = str;
+int gettoken(char *s, char **p1) {
+    static int c, nc;
+    static char *np1, *np2;
     
-    while (*src) {
-        if (*src == '$' && isalpha(src[1])) {
-            src++;
-            char varname[ENV_NAME_MAX + 1];
-            int i = 0;
-            while (isalnum(*src) || *src == '_') {
-                if (i < ENV_NAME_MAX) {
-                    varname[i++] = *src;
-                }
-                src++;
-            }
-            varname[i] = '\0';
-            
-            int found = 0;
-            for (int j = 0; j < env_count; j++) {
-                if (strcmp(env_vars[j].name, varname) == 0) {
-                    strcpy(dst, env_vars[j].value);
-                    dst += strlen(env_vars[j].value);
-                    found = 1;
-                    break;
-                }
-            }
-            if (!found) {
-
-            }
-        } else if (*src == '`') {
-            src++;
-            char cmd[MAX_INPUT];
-            int i = 0;
-            while (*src && *src != '`') {
-                cmd[i++] = *src++;
-            }
-            cmd[i] = '\0';
-            if (*src == '`') src++;
-            
-            int p[2];
-            pipe(p);
-            int pid = fork();
-            if (pid == 0) {
-                close(p[0]);
-                dup(p[1], 1);
-                close(p[1]);
-                runcmd(cmd);
-                exit();
-            } else {
-                close(p[1]);
-                char output[MAX_INPUT];
-                int n = read(p[0], output, MAX_INPUT - 1);
-                if (n > 0) {
-                    output[n] = '\0';
-                    if (n > 0 && output[n-1] == '\n') {
-                        output[n-1] = '\0';
-                    }
-                    strcpy(dst, output);
-                    dst += strlen(output);
-                }
-                close(p[0]);
-                wait(pid);
-            }
-        } else {
-            *dst++ = *src++;
-        }
+    if (s) {
+        nc = _gettoken(s, &np1, &np2);
+        return 0;
     }
-    *dst = '\0';
-    return result;
+    c = nc;
+    *p1 = np1;
+    nc = _gettoken(np2, &np1, &np2);
+    return c;
 }
 
-void runcmd_enhanced(char *s) {
-    char *comment = strchr(s, '#');
-    if (comment) {
-        *comment = '\0';
-    }
-    
-    char *cmds[100];
-    int cmd_count = 0;
-    char *cmd_types[100];
-    
-    char *p = s;
-    char *start = p;
-    while (*p) {
-        if (*p == ';') {
-            *p = '\0';
-            cmds[cmd_count] = start;
-            cmd_types[cmd_count] = ";";
-            cmd_count++;
-            start = p + 1;
-        } else if (*p == '&' && *(p+1) == '&') {
-            *p = '\0';
-            cmds[cmd_count] = start;
-            cmd_types[cmd_count] = "&&";
-            cmd_count++;
-            p++;
-            start = p + 1;
-        } else if (*p == '|' && *(p+1) == '|') {
-            *p = '\0';
-            cmds[cmd_count] = start;
-            cmd_types[cmd_count] = "||";
-            cmd_count++;
-            p++;
-            start = p + 1;
-        }
-        p++;
-    }
-    if (start < p) {
-        cmds[cmd_count] = start;
-        cmd_types[cmd_count] = "";
-        cmd_count++;
-    }
-    
-    int last_status = 0;
-    for (int i = 0; i < cmd_count; i++) {
-        while (*cmds[i] == ' ' || *cmds[i] == '\t') cmds[i]++;
-        if (*cmds[i] == '\0') continue;
+#define MAXARGS 128
 
-        if (i > 0) {
-            if (strcmp(cmd_types[i-1], "&&") == 0 && last_status != 0) {
-                continue;
-            }
-            if (strcmp(cmd_types[i-1], "||") == 0 && last_status == 0) {
-                continue;
-            }
-        }
-
-        char *expanded = expand_vars(cmds[i]);
-
-        gettoken(expanded, 0);
-        char *argv[MAXARGS];
-        int rightpipe = 0;
-        int argc = parsecmd_enhanced(argv, &rightpipe);
-        
-        if (argc == 0) continue;
-        argv[argc] = 0;
-
-        int is_builtin = 0;
-        if (strcmp(argv[0], "cd") == 0) {
-            last_status = builtin_cd(argc, argv);
-            is_builtin = 1;
-        } else if (strcmp(argv[0], "pwd") == 0) {
-            last_status = builtin_pwd(argc, argv);
-            is_builtin = 1;
-        } else if (strcmp(argv[0], "declare") == 0) {
-            last_status = builtin_declare(argc, argv);
-            is_builtin = 1;
-        } else if (strcmp(argv[0], "unset") == 0) {
-            last_status = builtin_unset(argc, argv);
-            is_builtin = 1;
-        } else if (strcmp(argv[0], "exit") == 0) {
-            builtin_exit(argc, argv);
-        } else if (strcmp(argv[0], "history") == 0) {
-            last_status = builtin_history(argc, argv);
-            is_builtin = 1;
-        }
-        
-        if (!is_builtin) {
-            char prog[MAXPATHLEN];
-            strcpy(prog, argv[0]);
-            if (!strchr(prog, '.')) {
-                strcat(prog, ".b");
-            }
-            
-            int pid = fork();
-            if (pid == 0) {
-                int child = spawn(prog, argv);
-                if (child >= 0) {
-                    wait(child);
-                    exit();
-                } else {
-                    debugf("spawn %s: %d\n", prog, child);
-                    exit();
-                }
-            } else {
-                wait(pid);
-                last_status = 0;
-            }
-        }
-        
-        close_all();
-        if (rightpipe) {
-            wait(rightpipe);
-        }
-    }
-}
-
-int parsecmd_enhanced(char **argv, int *rightpipe) {
+int parsecmd(char **argv, int *rightpipe) {
     int argc = 0;
+    static int append_mode = 0;
+    
     while (1) {
         char *t;
         int fd, r;
@@ -863,45 +544,287 @@ int parsecmd_enhanced(char **argv, int *rightpipe) {
             }
             break;
         case '>':
+            append_mode = 0;
             c = gettoken(0, &t);
             if (c == '>') {
-                if (gettoken(0, &t) != 'w') {
-                    debugf("syntax error: >> not followed by word\n");
-                    exit();
-                }
+                append_mode = 1;
+                c = gettoken(0, &t);
+            }
+            if (c != 'w') {
+                debugf("syntax error: > not followed by word\n");
+                exit();
+            }
+            if (append_mode) {
                 fd = open(t, O_WRONLY);
                 if (fd < 0) {
                     fd = open(t, O_WRONLY | O_CREAT);
                 }
-                if (fd < 0) {
-                    debugf("open %s for append: %d\n", t, fd);
-                    exit();
-                }
-                seek(fd, 0xfffffff);
-                if (fd != 1) {
-                    dup(fd, 1);
-                    close(fd);
-                }
-            } else if (c == 'w') {
-                fd = open(t, O_WRONLY | O_CREAT | O_TRUNC);
-                if (fd < 0) {
-                    debugf("open %s for write: %d\n", t, fd);
-                    exit();
-                }
-                if (fd != 1) {
-                    dup(fd, 1);
-                    close(fd);
+                if (fd >= 0) {
+                    lseek(fd, 0, SEEK_END);
                 }
             } else {
-                debugf("syntax error: > not followed by > or word\n");
+                fd = open(t, O_WRONLY | O_CREAT | O_TRUNC);
+            }
+            if (fd < 0) {
+                debugf("open %s for write: %d\n", t, fd);
+                exit();
+            }
+            if (fd != 1) {
+                dup(fd, 1);
+                close(fd);
+            }
+            break;
+        case '|':;
+            int p[2];
+            if (pipe(p) < 0) {
+                debugf("pipe: %d\n", r);
+                exit();
+            }
+            *rightpipe = fork();
+            if (*rightpipe == 0) {
+                dup(p[0], 0);
+                close(p[0]);
+                close(p[1]);
+                return parsecmd(argv, rightpipe);
+            } else if (*rightpipe > 0) {
+                dup(p[1], 1);
+                close(p[1]);
+                close(p[0]);
+                return argc;
+            } else {
+                debugf("fork: %d\n", *rightpipe);
                 exit();
             }
             break;
-        case '|':
-            // ... pipe处理代码 ...
-            break;
         }
     }
+    
     return argc;
 }
 
+void runcmd(char *s) {
+    char *expanded = expand_vars(s);
+    
+    const char *comment = strchr(expanded, '#');  // 使用 const char*
+    if (comment) {
+        expanded[comment - expanded] = '\0';  // 修改字符串而不是指针
+    }
+    
+    gettoken(expanded, 0);
+    
+    char *argv[MAXARGS];
+    int rightpipe = 0;
+    int argc = parsecmd(argv, &rightpipe);
+    if (argc == 0) {
+        return;
+    }
+    argv[argc] = 0;
+    
+    if (strcmp(argv[0], "cd") == 0) {
+        exit_status = builtin_cd(argc, argv);
+        return;
+    } else if (strcmp(argv[0], "pwd") == 0) {
+        exit_status = builtin_pwd(argc, argv);
+        return;
+    } else if (strcmp(argv[0], "declare") == 0) {
+        exit_status = builtin_declare(argc, argv);
+        return;
+    } else if (strcmp(argv[0], "unset") == 0) {
+        exit_status = builtin_unset(argc, argv);
+        return;
+    } else if (strcmp(argv[0], "exit") == 0) {
+        builtin_exit(argc, argv);
+        return;
+    } else if (strcmp(argv[0], "history") == 0) {
+        exit_status = builtin_history(argc, argv);
+        return;
+    }
+    
+    char prog[MAXPATHLEN];
+    strcpy(prog, argv[0]);
+    if (!strchr(prog, '.')) {
+        // 手动添加 .b 后缀，避免使用 strcat
+        int len = strlen(prog);
+        prog[len] = '.';
+        prog[len + 1] = 'b';
+        prog[len + 2] = '\0';
+    }
+    
+    int child = spawn(prog, argv);
+    close_all();
+    if (child >= 0) {
+        wait(child);
+        exit_status = 0;
+    } else {
+        debugf("spawn %s: %d\n", prog, child);
+        exit_status = 1;
+    }
+    if (rightpipe) {
+        wait(rightpipe);
+    }
+    exit();
+}
+
+void runcmd_multi(char *s) {
+    char *cmds[100];
+    char *types[100];
+    int ncmd = 0;
+    
+    char *start = s;
+    char *p = s;
+    
+    while (*p) {
+        if (*p == ';') {
+            *p = '\0';
+            cmds[ncmd] = start;
+            types[ncmd] = ";";
+            ncmd++;
+            start = p + 1;
+        } else if (*p == '&' && *(p+1) == '&') {
+            *p = '\0';
+            cmds[ncmd] = start;
+            types[ncmd] = "&&";
+            ncmd++;
+            p++;
+            start = p + 1;
+        } else if (*p == '|' && *(p+1) == '|') {
+            *p = '\0';
+            cmds[ncmd] = start;
+            types[ncmd] = "||";
+            ncmd++;
+            p++;
+            start = p + 1;
+        }
+        p++;
+    }
+    
+    if (start < p && *start) {
+        cmds[ncmd] = start;
+        types[ncmd] = "";
+        ncmd++;
+    }
+    
+    int last_status = 0;
+    for (int i = 0; i < ncmd; i++) {
+        if (i > 0) {
+            if (strcmp(types[i-1], "&&") == 0 && last_status != 0) {
+                continue;
+            }
+            if (strcmp(types[i-1], "||") == 0 && last_status == 0) {
+                continue;
+            }
+        }
+        
+        char *expanded = expand_vars(cmds[i]);
+        gettoken(expanded, 0);
+        char *argv[MAXARGS];
+        int rightpipe = 0;
+        int argc = parsecmd(argv, &rightpipe);
+        
+        if (argc > 0 && (strcmp(argv[0], "cd") == 0 || 
+                         strcmp(argv[0], "pwd") == 0 ||
+                         strcmp(argv[0], "declare") == 0 ||
+                         strcmp(argv[0], "unset") == 0 ||
+                         strcmp(argv[0], "history") == 0)) {
+            runcmd(cmds[i]);
+            last_status = exit_status;
+        } else {
+            int r = fork();
+            if (r < 0) {
+                user_panic("fork: %d", r);
+            }
+            if (r == 0) {
+                runcmd(cmds[i]);
+                exit();
+            } else {
+                wait(r);
+                last_status = 0;
+            }
+        }
+    }
+}
+
+char buf[1024];
+
+void usage(void) {
+    printf("usage: sh [-ix] [script-file]\n");
+    exit();
+}
+
+int main(int argc, char **argv) {
+    int r;
+    int interactive = iscons(0);
+    int echocmds = 0;
+    printf("\n:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\n");
+    printf("::                                                         ::\n");
+    printf("::                     MOS Shell 2024                      ::\n");
+    printf("::                                                         ::\n");
+    printf(":::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\n");
+    ARGBEGIN {
+    case 'i':
+        interactive = 1;
+        break;
+    case 'x':
+        echocmds = 1;
+        break;
+    default:
+        usage();
+    }
+    ARGEND
+    
+    if (argc > 1) {
+        usage();
+    }
+    if (argc == 1) {
+        close(0);
+        if ((r = open(argv[0], O_RDONLY)) < 0) {
+            user_panic("open %s: %d", argv[0], r);
+        }
+        user_assert(r == 0);
+    }
+    
+    int fd = open("/.mos_history", O_RDONLY);
+    if (fd >= 0) {
+        char line[MAX_INPUT];
+        char c;
+        int i = 0;
+        while (read(fd, &c, 1) == 1 && history_count < HISTORY_MAX) {
+            if (c == '\n') {
+                line[i] = '\0';
+                if (i > 0) {
+                    char *h = (char*)malloc(i + 1);
+                    strcpy(h, line);
+                    history[history_count++] = h;
+                }
+                i = 0;
+            } else if (i < MAX_INPUT - 1) {
+                line[i++] = c;
+            }
+        }
+        close(fd);
+    }
+    
+    for (;;) {
+        if (interactive) {
+            printf("\n$ ");
+        }
+        readline(buf, sizeof buf);
+        
+        if (buf[0] == '#') {
+            continue;
+        }
+        if (echocmds) {
+            printf("# %s\n", buf);
+        }
+        if ((r = fork()) < 0) {
+            user_panic("fork: %d", r);
+        }
+        if (r == 0) {
+            runcmd_multi(buf);
+            exit();
+        } else {
+            wait(r);
+        }
+    }
+    return 0;
+}

@@ -1,5 +1,17 @@
 #include <lib.h>
 
+static char *my_strcat(char *dst, const char *src) {
+    char *ret = dst;
+    while (*dst) {
+        dst++;
+    }
+    while (*src) {
+        *dst++ = *src++;
+    }
+    *dst = '\0';
+    return ret;
+}
+
 void normalize_path(char *path) {
     char *src = path;
     char *dst = path;
@@ -34,11 +46,20 @@ void resolve_path(const char *path, const char *cwd, char *result) {
     if (path[0] == '/') {
         strcpy(result, path);
     } else {
+        // 复制 cwd
         strcpy(result, cwd);
-        if (result[strlen(result) - 1] != '/') {
-            strcat(result, "/");
+        
+        // 获取 cwd 的长度
+        int len = strlen(result);
+        
+        // 如果 cwd 不以 '/' 结尾，添加 '/'
+        if (len > 0 && result[len - 1] != '/') {
+            result[len] = '/';
+            len++;
         }
-        strcat(result, path);
+        
+        // 复制 path 到 result 的末尾
+        strcpy(result + len, path);
     }
     normalize_path(result);
 }

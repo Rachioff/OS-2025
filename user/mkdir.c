@@ -1,5 +1,10 @@
 #include <lib.h>
 
+void create_dir_in_fs(const char *path) {
+    debugf("mkdir: creating directory is not fully implemented\n");
+    debugf("mkdir: would create directory '%s'\n", path);
+}
+
 int main(int argc, char **argv) {
     int pflag = 0;
     int i = 1;
@@ -15,20 +20,8 @@ int main(int argc, char **argv) {
     }
     
     for (; i < argc; i++) {
-        int r = syscall_mkdir(argv[i]);
-        if (r < 0) {
-            if (!pflag) {
-                if (r == -E_FILE_EXISTS) {
-                    printf("mkdir: cannot create directory '%s': File exists\n", argv[i]);
-                } else if (r == -E_NOT_FOUND) {
-                    printf("mkdir: cannot create directory '%s': No such file or directory\n", argv[i]);
-                }
-                return 1;
-            } else if (r == -E_NOT_FOUND) {
-                // 递归创建父目录
-                // 实现略...
-            }
-        }
+        create_dir_in_fs(argv[i]);
     }
+    
     return 0;
 }

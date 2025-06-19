@@ -820,3 +820,53 @@ int file_remove(char *path) {
 
 	return 0;
 }
+
+int dir_create(char *path) {
+    int r;
+    struct File *dir, *f;
+    char name[MAXNAMELEN];
+    
+    if ((r = walk_path(path, &dir, &f, name)) == 0) {
+        return -E_FILE_EXISTS;
+    }
+    
+    if (r != -E_NOT_FOUND || dir == 0) {
+        return r;
+    }
+    
+    if ((r = dir_alloc_file(dir, &f)) < 0) {
+        return r;
+    }
+    
+    strcpy(f->f_name, name);
+    f->f_type = FTYPE_DIR;
+    f->f_size = 0;
+    
+    file_flush(dir);
+    return 0;
+}
+
+int file_create_dir(char *path) {
+    char name[MAXNAMELEN];
+    int r;
+    struct File *dir, *f;
+    
+    if ((r = walk_path(path, &dir, &f, name)) == 0) {
+        return -E_FILE_EXISTS;
+    }
+    
+    if (r != -E_NOT_FOUND || dir == 0) {
+        return r;
+    }
+    
+    if (dir_alloc_file(dir, &f) < 0) {
+        return r;
+    }
+    
+    strcpy(f->f_name, name);
+    f->f_type = FTYPE_DIR;
+    f->f_size = 0;
+    
+    file_flush(dir);
+    return 0;
+}

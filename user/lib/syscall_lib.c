@@ -74,3 +74,14 @@ int syscall_read_dev(void *va, u_int dev, u_int size) {
 	/* Exercise 5.2: Your code here. (2/2) */
 	return msyscall(SYS_read_dev, va, dev, size);
 }
+
+int lseek(int fd, int offset, int whence) {
+    if (whence == SEEK_END) {
+        struct Stat st;
+        if (fstat(fd, &st) < 0) {
+            return -1;
+        }
+        offset = st.st_size;
+    }
+    return seek(fd, offset);
+}

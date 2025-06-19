@@ -119,6 +119,20 @@ int remove(const char *path);
 int ftruncate(int fd, u_int size);
 int sync(void);
 
+// path.c
+
+void normalize_path(char *path);
+void resolve_path(const char *path, const char *cwd, char *result);
+
+// Additional file operations
+#define O_MKDIR 0x0800
+#define SEEK_END 2
+int lseek(int fd, int offset, int whence);
+void *malloc(size_t size);
+void free(void *ptr);
+
+extern char cwd[MAXPATHLEN];
+
 #define user_assert(x)                                                                             \
 	do {                                                                                       \
 		if (!(x))                                                                          \
