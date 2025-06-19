@@ -1,5 +1,6 @@
+
 INITAPPS +=
 
-USERLIB += lib/path.o lib/malloc.o
+USERLIB	+=
 
-USERAPPS += touch.b rm.b mkdir.b
+USERAPPS +=
