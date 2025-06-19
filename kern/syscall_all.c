@@ -516,9 +516,9 @@ int sys_read_dev(u_int va, u_int pa, u_int len) {
 }
 
 void sys_exit(u_int status) {
-    curenv->env_status = ENV_FREE;
-    curenv->env_exit_status = status;
-    env_destroy(curenv); 
+	curenv->env_status = ENV_FREE;
+	curenv->env_exit_status = status; // Save the exit status
+	env_destroy(curenv);
 }
 
 void *syscall_table[MAX_SYSNO] = {

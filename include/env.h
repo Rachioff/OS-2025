@@ -39,7 +39,6 @@ struct Env {
 
 	// Lab 6 scheduler counts
 	u_int env_runs; // number of times we've been env_run'ed
-
 	int env_exit_status;
 };
 

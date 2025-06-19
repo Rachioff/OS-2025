@@ -164,6 +164,11 @@ void serve_open(u_int envid, struct Fsreq_open *rq) {
 		return;
 	}
 
+	if ((o->o_mode & O_APPEND)) {
+		struct Fd *fd = (struct Fd *)rq;
+		fd->fd_offset = f->f_size;
+	}
+
 	// Save the file pointer.
 	o->o_file = f;
 
@@ -172,10 +177,6 @@ void serve_open(u_int envid, struct Fsreq_open *rq) {
 		if ((r = file_set_size(f, 0)) < 0) {
 			ipc_send(envid, r, 0, 0);
 		}
-	}
-
-	if (rq->req_omode & O_MKDIR) {
-		f->f_type = FTYPE_DIR;
 	}
 
 	// Fill out the Filefd structure

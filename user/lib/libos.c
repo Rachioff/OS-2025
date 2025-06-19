@@ -2,11 +2,11 @@
 #include <lib.h>
 #include <mmu.h>
 
-void exit(int status) { // Add status parameter
+void exit(int status) {
 #if !defined(LAB) || LAB >= 5
-    close_all();
+	close_all();
 #endif
-    syscall_exit(status); // Use new syscall
+	syscall_exit(status);
 }
 
 const volatile struct Env *env;

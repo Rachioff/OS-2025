@@ -12,24 +12,28 @@ void rm_dir(const char *path) {
     struct File f;
     
     if ((fd = open(path, O_RDONLY)) < 0) {
-        if (!flag_f) printf("rm: cannot open '%s': %e\n", path, fd);
+        if (!flag_f) printf("rm: cannot open '%s': %d\n", path, fd);
         return;
     }
 
-    while ((r = readn(fd, &f, sizeof f)) == sizeof f) {
-        if (f.f_name[0]) {
+    // Read directory entries and delete them recursively
+    while (readn(fd, &f, sizeof f) == sizeof f) {
+        if (f.f_name[0] && strcmp(f.f_name, ".") != 0 && strcmp(f.f_name, "..") != 0) {
             char child_path[MAXPATHLEN];
-            strcpy(child_path, path);
-            if(child_path[strlen(child_path)-1] != '/') strcat(child_path, "/");
-            strcat(child_path, f.f_name);
+            // Build child path
+            if (strcmp(path, "/") == 0) {
+                sprintf(child_path, "/%s", f.f_name);
+            } else {
+                sprintf(child_path, "%s/%s", path, f.f_name);
+            }
             rm_recursive(child_path);
         }
     }
-
     close(fd);
     
+    // Remove the now-empty directory
     if ((r = remove(path)) < 0) {
-        if (!flag_f) printf("rm: cannot remove directory '%s': %e\n", path, r);
+        if (!flag_f) printf("rm: cannot remove directory '%s': %d\n", path, r);
     }
 }
 
@@ -38,7 +42,7 @@ void rm_recursive(const char *path) {
     int r;
 
     if ((r = stat(path, &st)) < 0) {
-        if (!flag_f) printf("rm: cannot stat '%s': No such file or directory\n", path);
+        if (!flag_f) printf("rm: cannot remove '%s': No such file or directory\n", path);
         return;
     }
 
@@ -46,26 +50,27 @@ void rm_recursive(const char *path) {
         rm_dir(path);
     } else {
         if ((r = remove(path)) < 0) {
-            if (!flag_f) printf("rm: cannot remove '%s': %e\n", path, r);
+            if (!flag_f) printf("rm: cannot remove '%s': %d\n", path, r);
         }
     }
 }
 
 int main(int argc, char **argv) {
-    int i;
+    int i = 1;
+
     if (argc < 2) {
-        printf("Usage: rm [-rf] <file...>\n");
+        if (!flag_f) printf("rm: missing operand\n");
         return 1;
     }
     
-    // Simple argument parsing
-    for (i = 1; i < argc; i++) {
-        if (argv[i][0] != '-') break;
-        if (strchr(argv[i], 'r')) flag_r = 1;
-        if (strchr(argv[i], 'f')) flag_f = 1;
+    // Argument parsing
+    if (argv[1][0] == '-') {
+        if (strchr(argv[1], 'r')) flag_r = 1;
+        if (strchr(argv[1], 'f')) flag_f = 1;
+        i = 2;
     }
 
-    if (i == argc) {
+    if (i >= argc) {
          if (!flag_f) printf("rm: missing operand\n");
          return 1;
     }
@@ -75,9 +80,7 @@ int main(int argc, char **argv) {
         int r = stat(argv[i], &st);
 
         if (r < 0) {
-            if (!flag_f) {
-                printf("rm: cannot remove '%s': No such file or directory\n", argv[i]);
-            }
+            if (!flag_f) printf("rm: cannot remove '%s': No such file or directory\n", argv[i]);
             continue;
         }
 
@@ -86,9 +89,13 @@ int main(int argc, char **argv) {
                 rm_recursive(argv[i]);
             } else {
                 printf("rm: cannot remove '%s': Is a directory\n", argv[i]);
+                return 1;
             }
         } else {
-            remove(argv[i]);
+            if ((r = remove(argv[i])) < 0) {
+                 if (!flag_f) printf("rm: cannot remove '%s': No such file or directory\n", argv[i]);
+                 return 1;
+            }
         }
     }
     return 0;

@@ -5,9 +5,9 @@ int main(int argc, char **argv) {
 		printf("Usage: touch <file>\n");
 		return 1;
 	}
-	int fd;
-	if ((fd = open(argv[1], O_CREAT | O_RDWR)) < 0) {
-		printf("touch: cannot touch '%s': %e\n", argv[1], fd);
+	int fd = open(argv[1], O_CREAT | O_RDWR);
+	if (fd < 0) {
+		printf("touch: cannot touch '%s': No such file or directory\n", argv[1]);
 		return 1;
 	}
 	close(fd);

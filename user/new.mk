@@ -1,4 +1,8 @@
+UPROGS += touch
+UPROGS += mkdir
+UPROGS += rm
+INITAPPS +=
 
-BINS += user/touch.b
-BINS += user/mkdir.b
-BINS += user/rm.b
+USERLIB	+=
+
+USERAPPS +=

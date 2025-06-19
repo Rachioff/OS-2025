@@ -76,5 +76,5 @@ int syscall_read_dev(void *va, u_int dev, u_int size) {
 }
 
 void syscall_exit(int status) {
-    msyscall(SYS_exit, status);
+	msyscall(SYS_exit, status);
 }
