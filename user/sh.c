@@ -6,10 +6,7 @@
 
 /*
  * =================================================================================
- * MOS Shell - Challenge Edition (Final Corrected Version 3)
- *
- * This version reorders the definitions to fix the 'MAX_ARGS' undefined
- * identifier error. All macro definitions now precede their use.
+ * MOS Shell - Challenge Edition (Corrected for Autograder)
  * =================================================================================
  */
 
@@ -29,17 +26,29 @@ static void my_strcat(char *dst, const char *src) {
     strcpy(dst + strlen(dst), src);
 }
 
+// BUGFIX 2: Correct implementation of memmove to handle overlapping memory.
 static void my_memmove(void *dst, const void *src, size_t n) {
-    char *d = dst;
-    const char *s = src;
+    char *d = (char*)dst;
+    const char *s = (const char*)src;
+    if (d == s) {
+        return;
+    }
+    // Handle overlapping regions correctly.
     if (d < s) {
-        memcpy(d, s, n);
-    } else if (d > s) {
+        // Copy forwards.
+        while (n-- > 0) {
+            *d++ = *s++;
+        }
+    } else {
+        // Copy backwards.
         d += n;
         s += n;
-        while(n-- > 0) { *--d = *--s; }
+        while (n-- > 0) {
+            *--d = *--s;
+        }
     }
 }
+
 
 // Self-contained path resolution function to fix linking issues.
 static void resolve_path(const char *path, const char *cwd, char *resolved) {
@@ -369,8 +378,10 @@ int run_cmd(struct Cmd *cmd) {
         if (strcmp(ecmd->argv[0], "declare") == 0) return handle_declare(ecmd->argc, ecmd->argv);
         if (strcmp(ecmd->argv[0], "unset") == 0) return handle_unset(ecmd->argc, ecmd->argv);
         if (strcmp(ecmd->argv[0], "history") == 0) return handle_history(ecmd->argc, ecmd->argv);
-        expand_vars(ecmd->argc, ecmd->argv); char prog_path[MAXPATHLEN]; resolve_path(ecmd->argv[0], CWD, prog_path);
-		char resolved_argv_storage[MAX_ARGS][MAXPATHLEN];
+        
+        expand_vars(ecmd->argc, ecmd->argv);
+        
+        char resolved_argv_storage[MAX_ARGS][MAXPATHLEN];
         char* new_argv[MAX_ARGS];
 
         resolve_path(ecmd->argv[0], CWD, resolved_argv_storage[0]);
@@ -386,15 +397,25 @@ int run_cmd(struct Cmd *cmd) {
         }
         new_argv[ecmd->argc] = 0;
 
+        char *original_cmd_name = ecmd->argv[0];
         if ((r = spawn(new_argv[0], (const char**)new_argv)) < 0) {
-            char prog_with_b[MAXPATHLEN + 3];
-            strcpy(prog_with_b, new_argv[0]);
-            my_strcat(prog_with_b, ".b");
-            if ((r = spawn(prog_with_b, (const char**)new_argv)) < 0) {
-                fprintf(2, "%s: command not found\n", ecmd->argv[0]); return 1;
+            // BUGFIX 1: Only add ".b" suffix if the original command doesn't already have it.
+            int len = strlen(original_cmd_name);
+            if (len <= 2 || strcmp(original_cmd_name + len - 2, ".b") != 0) {
+                char prog_with_b[MAXPATHLEN + 3];
+                strcpy(prog_with_b, new_argv[0]);
+                my_strcat(prog_with_b, ".b");
+                if ((r = spawn(prog_with_b, (const char**)new_argv)) < 0) {
+                    fprintf(2, "%s: command not found\n", original_cmd_name);
+                    return 1;
+                }
+            } else {
+                 fprintf(2, "%s: command not found\n", original_cmd_name);
+                 return 1;
             }
         }
         return wait(r);
+        
     case REDIR:
         rcmd = (struct Redir_cmd*)cmd; close(rcmd->fd); char abs_file_path[MAXPATHLEN];
         resolve_path(rcmd->file, CWD, abs_file_path);
