@@ -174,6 +174,10 @@ void serve_open(u_int envid, struct Fsreq_open *rq) {
 		}
 	}
 
+	if (rq->req_omode & O_MKDIR) {
+		f->f_type = FTYPE_DIR;
+	}
+
 	// Fill out the Filefd structure
 	ff = (struct Filefd *)o->o_ff;
 	ff->f_file = *f;

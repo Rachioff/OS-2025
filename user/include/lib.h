@@ -14,7 +14,7 @@
 #define pages ((const volatile struct Page *)UPAGES)
 
 // libos
-void exit(void) __attribute__((noreturn));
+void exit(int status) __attribute__((noreturn));
 
 extern const volatile struct Env *env;
 
@@ -55,6 +55,7 @@ int syscall_set_tlb_mod_entry(u_int envid, void (*func)(struct Trapframe *));
 int syscall_mem_alloc(u_int envid, void *va, u_int perm);
 int syscall_mem_map(u_int srcid, void *srcva, u_int dstid, void *dstva, u_int perm);
 int syscall_mem_unmap(u_int envid, void *va);
+void syscall_exit(int status);
 
 __attribute__((always_inline)) inline static int syscall_exofork(void) {
 	return msyscall(SYS_exofork, 0, 0, 0, 0, 0);
@@ -74,7 +75,7 @@ void ipc_send(u_int whom, u_int val, const void *srcva, u_int perm);
 u_int ipc_recv(u_int *whom, void *dstva, u_int *perm);
 
 // wait.c
-void wait(u_int envid);
+int wait(u_int envid);
 
 // console.c
 int opencons(void);
@@ -136,5 +137,6 @@ int sync(void);
 // Unimplemented open modes
 #define O_EXCL 0x0400  /* error if already exists */
 #define O_MKDIR 0x0800 /* create directory, not regular file */
+#define O_APPEND 0x1000 /* append mode */
 
 #endif

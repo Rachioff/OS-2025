@@ -515,6 +515,12 @@ int sys_read_dev(u_int va, u_int pa, u_int len) {
 	return -E_INVAL;
 }
 
+void sys_exit(u_int status) {
+    curenv->env_status = ENV_FREE;
+    curenv->env_exit_status = status;
+    env_destroy(curenv); 
+}
+
 void *syscall_table[MAX_SYSNO] = {
     [SYS_putchar] = sys_putchar,
     [SYS_print_cons] = sys_print_cons,
@@ -534,6 +540,7 @@ void *syscall_table[MAX_SYSNO] = {
     [SYS_cgetc] = sys_cgetc,
     [SYS_write_dev] = sys_write_dev,
     [SYS_read_dev] = sys_read_dev,
+	[SYS_exit] = sys_exit,
 };
 
 /* Overview:

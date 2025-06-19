@@ -2,14 +2,11 @@
 #include <lib.h>
 #include <mmu.h>
 
-void exit(void) {
-	// After fs is ready (lab5), all our open files should be closed before dying.
+void exit(int status) { // Add status parameter
 #if !defined(LAB) || LAB >= 5
-	close_all();
+    close_all();
 #endif
-
-	syscall_env_destroy(0);
-	user_panic("unreachable code");
+    syscall_exit(status); // Use new syscall
 }
 
 const volatile struct Env *env;
@@ -23,5 +20,5 @@ void libmain(int argc, char **argv) {
 	main(argc, argv);
 
 	// exit gracefully
-	exit();
+	exit(1);
 }
