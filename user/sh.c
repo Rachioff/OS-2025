@@ -38,10 +38,23 @@ static void my_memmove(void *dst, const void *src, size_t n) {
 static void resolve_path(const char *path, const char *cwd, char *resolved) {
     char temp_path[MAXPATHLEN];
     if (path[0] == '/') {
+        if (strlen(path) >= MAXPATHLEN) {
+            fprintf(2, "path is too long\n");
+            resolved[0] = '\0';
+            return;
+        }
         strcpy(temp_path, path);
     } else {
-        if (strlen(cwd) == 1 && cwd[0] == '/') { strcpy(temp_path, "/"); }
-        else { strcpy(temp_path, cwd); }
+        if (strlen(cwd) + strlen(path) + 1 >= MAXPATHLEN) {
+            fprintf(2, "path is too long\n");
+            resolved[0] = '\0';
+            return;
+        }
+        if (strlen(cwd) == 1 && cwd[0] == '/') {
+            strcpy(temp_path, "/");
+        } else {
+            strcpy(temp_path, cwd);
+        }
         my_strcat(temp_path, "/");
         my_strcat(temp_path, path);
     }
@@ -350,10 +363,12 @@ int run_cmd(struct Cmd *cmd) {
         
         new_argv[0] = ecmd->argv[0]; 
         for (int i = 1; i < ecmd->argc; i++) {
-            if (ecmd->argv[i][0] != '-' && (strchr(ecmd->argv[i], '/') != NULL || strcmp(ecmd->argv[i], ".") == 0 || strcmp(ecmd->argv[i], "..") == 0)) {
-                 resolve_path(ecmd->argv[i], CWD, resolved_arg_storage[i]);
-                 new_argv[i] = resolved_arg_storage[i];
-            } else { new_argv[i] = ecmd->argv[i]; }
+            if (ecmd->argv[i][0] != '-') {
+                resolve_path(ecmd->argv[i], CWD, resolved_arg_storage[i]);
+                new_argv[i] = resolved_arg_storage[i];
+            } else {
+                new_argv[i] = ecmd->argv[i];
+            }
         }
         new_argv[ecmd->argc] = NULL;
         if ((r = spawn(resolved_prog_path, (const char**)new_argv)) < 0) {
@@ -380,10 +395,41 @@ int run_cmd(struct Cmd *cmd) {
         return wait(r);
 
     case PIPE:
-         pcmd = (struct Pipe_cmd*)cmd; pipe(p); int r_left, r_right;
-         if ((r_left = fork()) == 0) { close(p[0]); dup(p[1], 1); close(p[1]); exit(run_cmd(pcmd->left)); }
-         if ((r_right = fork()) == 0) { close(p[1]); dup(p[0], 0); close(p[0]); exit(run_cmd(pcmd->right)); }
-         close(p[0]); close(p[1]); wait(r_left); return wait(r_right);
+        pcmd = (struct Pipe_cmd*)cmd;
+        pipe(p);
+        int r_left, r_right;
+
+        if ((r_left = fork()) < 0) {
+            fprintf(2, "fork left pipe failed\n");
+            close(p[0]);
+            close(p[1]);
+            return -1;
+        }
+        if (r_left == 0) {
+            close(p[0]);
+            dup(p[1], 1);
+            close(p[1]);
+            exit(run_cmd(pcmd->left));
+        }
+
+        if ((r_right = fork()) < 0) {
+            fprintf(2, "fork right pipe failed\n");
+            close(p[0]);
+            close(p[1]);
+            wait(r_left);
+            return -1;
+        }
+        if (r_right == 0) {
+            close(p[1]);
+            dup(p[0], 0);
+            close(p[0]);
+            exit(run_cmd(pcmd->right));
+        }
+
+        close(p[0]);
+        close(p[1]);
+        wait(r_left);
+        return wait(r_right);
     case LIST:
         lcmd = (struct List_cmd*)cmd; run_cmd(lcmd->left); return run_cmd(lcmd->right);
     case AND:
