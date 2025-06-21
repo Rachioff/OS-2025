@@ -36,3 +36,5 @@
 		    : ((x), abort(), (char *)0)))
 
 #define ARGC() _argc
+
+#define MAX_ARGS 64
