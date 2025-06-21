@@ -1,8 +1,14 @@
 #include <lib.h>
 
+extern void resolve_path(const char *path, char *resolved_path);
+
 void mkdir_p(const char *path) {
     char p_path[MAXPATHLEN];
-    strcpy(p_path, path);
+    char resolved[MAXPATHLEN];
+    
+    // 先解析路径
+    resolve_path(path, resolved);
+    strcpy(p_path, resolved);
 
     char *p = p_path;
     if (*p == '/') {
@@ -44,8 +50,11 @@ int main(int argc, char **argv) {
     }
 
     for (; i < argc; i++) {
+        char resolved[MAXPATHLEN];
+        resolve_path(argv[i], resolved);
+        
         struct Stat st;
-        if (stat(argv[i], &st) == 0) {
+        if (stat(resolved, &st) == 0) {
             if (!p_flag) { 
                 printf("mkdir: cannot create directory '%s': File exists\n", argv[i]);
                 return 1;
@@ -56,7 +65,7 @@ int main(int argc, char **argv) {
         if (p_flag) {
             mkdir_p(argv[i]);
         } else {
-            int r = open(argv[i], O_MKDIR | O_CREAT);
+            int r = open(resolved, O_MKDIR | O_CREAT);
             if (r < 0) {
                 printf("mkdir: cannot create directory '%s': No such file or directory\n", argv[i]);
                 return 1;

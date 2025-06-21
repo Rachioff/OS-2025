@@ -1,6 +1,8 @@
 #include <lib.h>
 #include <args.h>
 #include <fs.h>
+extern char g_cwd[MAXPATHLEN];
+extern void resolve_path(const char *path, char *resolved_path);
 
 // --- START: Self-implemented standard functions ---
 char* strcat(char* dest, const char* src) {
@@ -28,8 +30,6 @@ void my_strncpy(char *dst, const char *src, int n) {
 }
 // --- END: Self-implemented standard functions ---
 
-// --- Global State & Data Structures ---
-char CWD[MAXPATHLEN];
 // Variable Storage
 #define MAX_VARS 64 
 #define VAR_MAX_NAME_LEN 16
@@ -386,7 +386,6 @@ void handle_backticks(char* dst, const char* src, int dst_size) {
 }
 
 // All other helper functions...
-void resolve_path(const char*, char*);
 int handle_cd(int, char**);
 int handle_pwd(int, char**);
 struct Var* find_var(const char*);
@@ -408,79 +407,93 @@ void load_history();
 
 
 // --- Main Loop ---
-void main() {
+int main() { 
     static char buf[BUF_MAX];
     static char backticked_buf[BUF_MAX * 2];
     static char expanded_buf[BUF_MAX * 4];
     char prompt[MAXPATHLEN + 4];
-    strcpy(CWD, "/");
-    for (int i = 0; i < MAX_VARS; i++) vars[i].in_use = 0;
+
+    strcpy(g_cwd, "/");
+
+    for (int i = 0; i < MAX_VARS; i++) {
+        vars[i].in_use = 0;
+    }
+
     load_history();
+
     printf("\n"); 
+
     for (;;) {
         reset_pools();
-        strcpy(prompt, CWD);
+
+        strcpy(prompt, g_cwd);
         strcat(prompt, "$ ");
+
         readline_rich(prompt, buf);
+
         if (buf[0] == '\0') continue;
+
         add_to_history(buf);
+
         handle_backticks(backticked_buf, buf, sizeof(backticked_buf));
+
         expand_vars(expanded_buf, backticked_buf, sizeof(expanded_buf));
+
         char* comment_start = strchr(expanded_buf, '#');
         if (comment_start != NULL) *comment_start = '\0';
+
         if (expanded_buf[0] == '\0') continue;
+
         struct cmd* parsed_cmd = parse_cmd(expanded_buf);
-        if (parsed_cmd) run_cmd(parsed_cmd);
+
+        if (parsed_cmd) {
+            run_cmd(parsed_cmd);
+        }
     }
+
+    return 0;
 }
 
 
 // --- Function Implementations (from previous versions) ---
-void resolve_path(const char *path, char *resolved_path) {
-    char temp_path[MAXPATHLEN], temp_path_copy[MAXPATHLEN];
-    if (path[0] == '/') strcpy(temp_path, path);
-    else {
-        if (strcmp(CWD, "/") == 0) strcpy(temp_path, "/");
-        else strcpy(temp_path, CWD);
-        strcat(temp_path, "/");
-        strcat(temp_path, path);
-    }
-    my_strncpy(temp_path_copy, temp_path, MAXPATHLEN);
-    char *components[MAX_ARGS]; int top = -1;
-    char *p = temp_path_copy, *start = p;
-    if (*p == '/') start++;
-    for(p = start; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            if (strcmp(start, "..") == 0) { if (top > -1) top--; }
-            else if (strcmp(start, ".") != 0 && strlen(start) > 0) { if (top < MAX_ARGS - 1) components[++top] = start; }
-            start = p + 1;
-        }
-    }
-    if (strlen(start) > 0) {
-        if (strcmp(start, "..") == 0) { if (top > -1) top--; }
-        else if (strcmp(start, ".") != 0) { if (top < MAX_ARGS - 1) components[++top] = start; }
-    }
-    if (top == -1) strcpy(resolved_path, "/");
-    else {
-        resolved_path[0] = '\0';
-        for (int i = 0; i <= top; i++) { strcat(resolved_path, "/"); strcat(resolved_path, components[i]); }
-    }
-}
 int handle_cd(int argc, char **argv) {
-    if (argc > 2) { printf("Too many args for cd command\n"); return 1; }
+    if (argc > 2) { 
+        printf("Too many args for cd command\n"); 
+        return 1; 
+    }
     const char *target_path = (argc == 1) ? "/" : argv[1];
-    char resolved[MAXPATHLEN]; resolve_path(target_path, resolved);
+    char resolved[MAXPATHLEN]; 
+    resolve_path(target_path, resolved);
     struct Stat st;
-    if (stat(resolved, &st) < 0) { printf("cd: The directory '%s' does not exist\n", (argc == 1) ? "/" : argv[1]); return 1; }
-    if (!st.st_isdir) { printf("cd: '%s' is not a directory\n", (argc == 1) ? "/" : argv[1]); return 1; }
-    strcpy(CWD, resolved);
+    if (stat(resolved, &st) < 0) { 
+        printf("cd: The directory '%s' does not exist\n", (argc == 1) ? "/" : argv[1]); 
+        return 1; 
+    }
+    if (!st.st_isdir) { 
+        printf("cd: '%s' is not a directory\n", (argc == 1) ? "/" : argv[1]); 
+        return 1; 
+    }
+    strcpy(g_cwd, resolved);
+    
+    // 保存工作目录到文件，供其他程序读取
+    int fd = open("/.cwd", O_WRONLY | O_CREAT | O_TRUNC);
+    if (fd >= 0) {
+        write(fd, g_cwd, strlen(g_cwd));
+        close(fd);
+    }
+    
     return 0;
 }
+
 int handle_pwd(int argc, char **argv) {
-    if (argc != 1) { printf("pwd: expected 0 arguments; got %d\n", argc - 1); return 2; }
-    printf("%s\n", CWD); return 0;
+    if (argc != 1) { 
+        printf("pwd: expected 0 arguments; got %d\n", argc - 1); 
+        return 2; 
+    }
+    printf("%s\n", g_cwd); 
+    return 0;
 }
+
 struct Var* find_var(const char *name) {
     for (int i = 0; i < MAX_VARS; i++) if (vars[i].in_use && strcmp(vars[i].name, name) == 0) return &vars[i];
     return NULL;
