@@ -27,34 +27,40 @@ struct Dev devfile = {
 //  the underlying error on failure.
 int open(const char *path, int mode) {
 	int r;
+    struct Fd *fd;
+    // 新增：定义一个缓冲区，用来存放解析后的绝对路径
+    char resolved_path[MAXPATHLEN];
 
-	// Step 1: Alloc a new 'Fd' using 'fd_alloc' in fd.c.
-	// Hint: return the error code if failed.
-	struct Fd *fd;
-	/* Exercise 5.9: Your code here. (1/5) */
-	try(fd_alloc(&fd));
-	// Step 2: Prepare the 'fd' using 'fsipc_open' in fsipc.c.
-	/* Exercise 5.9: Your code here. (2/5) */
-	try(fsipc_open(path, mode, fd));
-	// Step 3: Set 'va' to the address of the page where the 'fd''s data is cached, using
-	// 'fd2data'. Set 'size' and 'fileid' correctly with the value in 'fd' as a 'Filefd'.
-	char *va;
-	struct Filefd *ffd;
-	u_int size, fileid;
-	/* Exercise 5.9: Your code here. (3/5) */
-	va = fd2data(fd);
-	ffd = (struct Filefd*)fd;
-	size = ffd->f_file.f_size;
-	fileid = ffd->f_fileid;
-	// Step 4: Map the file content using 'fsipc_map'.
-	for (int i = 0; i < size; i += PTMAP) {
-		/* Exercise 5.9: Your code here. (4/5) */
-		try(fsipc_map(fileid, i, va + i));
-	}
+    // Step 1: Alloc a new 'Fd' using 'fd_alloc'.
+    if ((r = fd_alloc(&fd)) < 0) {
+        return r;
+    }
 
-	// Step 5: Return the number of file descriptor using 'fd2num'.
-	/* Exercise 5.9: Your code here. (5/5) */
-	return fd2num(fd);
+    // Step 2: 新增：调用路径解析函数
+    // 将用户传入的`path`（可能是相对路径）转换为绝对路径`resolved_path`
+    resolve_path(path, resolved_path);
+
+    // Step 3: 使用解析后的绝对路径 `resolved_path` 去请求文件系统服务
+    if ((r = fsipc_open(resolved_path, mode, fd)) < 0) {
+        fd_close(fd); // 如果失败，回收fd
+        return r;
+    }
+
+    // Step 4: Map the file content.
+    char *va = fd2data(fd);
+    struct Filefd *ffd = (struct Filefd *)fd;
+    u_int size = ffd->f_file.f_size;
+    u_int fileid = ffd->f_fileid;
+
+    for (int i = 0; i < size; i += PTMAP) {
+        if ((r = fsipc_map(fileid, i, va + i)) < 0) {
+            close(fd2num(fd)); // 如果失败，关闭并回收fd
+            return r;
+        }
+    }
+
+    // Step 5: Return the number of file descriptor.
+    return fd2num(fd);
 }
 
 // Overview:

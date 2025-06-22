@@ -2,10 +2,6 @@
 #include <args.h>
 #include <fs.h>
 
-// 声明全局变量和函数
-extern char g_cwd[MAXPATHLEN];
-extern void resolve_path(const char *path, char *resolved_path);
-
 // --- START: Self-implemented standard functions ---
 // 安全的字符串拼接
 char* strcat(char* dest, const char* src) {

@@ -138,4 +138,6 @@ int sync(void);
 #define O_MKDIR 0x0800 /* create directory, not regular file */
 #define O_APPEND 0x1000
 
+extern char g_cwd[MAXPATHLEN];
+void resolve_path(const char *path, char *resolved_path);
 #endif
