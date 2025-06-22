@@ -1,16 +1,21 @@
 #include <lib.h>
 #include <args.h>
 #include <fs.h>
+
+// 声明全局变量和函数
 extern char g_cwd[MAXPATHLEN];
 extern void resolve_path(const char *path, char *resolved_path);
 
 // --- START: Self-implemented standard functions ---
+// 安全的字符串拼接
 char* strcat(char* dest, const char* src) {
     char* ptr = dest + strlen(dest);
     while (*src != '\0') *ptr++ = *src++;
     *ptr = '\0';
     return dest;
 }
+
+// 支持重叠内存的安全移动
 void* my_memmove(void* dst, const void* src, u_int n) {
     char* d = dst;
     const char* s = src;
@@ -19,24 +24,16 @@ void* my_memmove(void* dst, const void* src, u_int n) {
     else { d += n; s += n; while (n--) *--d = *--s; }
     return dst;
 }
-// FIX: Replaced the faulty my_strncpy with a safe and correct version.
-void my_strncpy(char *dst, const char *src, int n) {
-    int i;
-    for(i = 0; i < n && src[i] != '\0'; i++) {
-        dst[i] = src[i];
-    }
-    // Always null-terminate, right after the copied content.
-    dst[i] = '\0';
-}
 // --- END: Self-implemented standard functions ---
 
-// Variable Storage
+// 环境变量存储
 #define MAX_VARS 64 
 #define VAR_MAX_NAME_LEN 16
 #define VAR_MAX_VALUE_LEN 16
 struct Var { char name[VAR_MAX_NAME_LEN + 1]; char value[VAR_MAX_VALUE_LEN + 1]; u_char is_exported; u_char is_readonly; u_char in_use; };
 struct Var vars[MAX_VARS];
-// Rich Readline & History Storage
+
+// 行编辑与历史指令存储
 #define BUF_MAX 1024
 char line_buffer[BUF_MAX];
 int line_len = 0, line_pos = 0;
@@ -47,18 +44,18 @@ int history_count = 0, history_pos = 0;
 
 // --- START: AST Parser and Executor ---
 
-// Token and AST Node Types
+// Token类型
 #define T_EOF   0
 #define T_WORD  1
 #define T_REDIR_IN  '<'
 #define T_REDIR_OUT '>'
-#define T_REDIR_APP 'a' // Represents >>
+#define T_REDIR_APP 'a' // 代表 >>
 #define T_PIPE  '|'
-#define T_AND   '&' // Represents &&
-#define T_OR    'o' // Represents ||
+#define T_AND   '&' // 代表 &&
+#define T_OR    'o' // 代表 ||
 #define T_SEMI  ';'
 
-// AST Node Types
+// AST 节点类型
 #define EXEC  1
 #define REDIR 2
 #define PIPE  3
@@ -66,7 +63,7 @@ int history_count = 0, history_pos = 0;
 #define AND   5 // For &&
 #define OR    6 // For ||
 
-// AST Node Structs
+// AST 节点结构体
 struct cmd { int type; };
 struct execcmd { int type; int argc; char *argv[MAX_ARGS]; };
 struct redircmd { int type; struct cmd *cmd; char *file; int mode; int fd; };
@@ -74,9 +71,19 @@ struct pipecmd { int type; struct cmd *left; struct cmd *right; };
 struct listcmd { int type; struct cmd *left; struct cmd *right; };
 struct logiccmd { int type; struct cmd *left; struct cmd *right; };
 
-// --- Static Memory Pools ---
+
+// --- FIX: 使用union来定义内存池，确保大小正确 ---
+union cmd_union {
+    struct execcmd exe;
+    struct redircmd redir;
+    struct pipecmd pipe;
+    struct listcmd list;
+    struct logiccmd logic;
+};
+
+// --- 静态内存池 ---
 #define CMD_POOL_SIZE 50
-char cmd_pool[CMD_POOL_SIZE][sizeof(struct logiccmd)];
+union cmd_union cmd_pool[CMD_POOL_SIZE];
 int next_cmd_node = 0;
 
 #define STR_POOL_SIZE 4096
@@ -87,17 +94,20 @@ void reset_pools() {
     next_cmd_node = 0;
     next_str_pos = 0;
 }
+
+// --- FIX: node_alloc现在可以正确工作，因为它总是分配一个足够大的union块 ---
 void* node_alloc(int size) {
     if(next_cmd_node >= CMD_POOL_SIZE) user_panic("AST node pool exhausted");
+    // size参数被忽略，因为我们总是分配一个union大小的块
     return &cmd_pool[next_cmd_node++];
 }
+
 char* str_alloc(int n) {
     if (next_str_pos + n > STR_POOL_SIZE) user_panic("String pool exhausted");
     char* ret = &str_pool[next_str_pos];
     next_str_pos += n;
     return ret;
 }
-
 
 // Parser state
 char *ps, *es;
@@ -112,15 +122,15 @@ struct cmd* parse_with_redir(void);
 struct cmd* parse_exec(void);
 int run_cmd(struct cmd* cmd);
 
-// Constructor functions for AST nodes
+// AST节点构造函数
 struct cmd* execcmd(void) {
-    struct execcmd *cmd = node_alloc(sizeof(*cmd));
+    struct execcmd *cmd = (struct execcmd*)node_alloc(sizeof(*cmd));
     memset(cmd, 0, sizeof(*cmd));
     cmd->type = EXEC;
     return (struct cmd*)cmd;
 }
 struct cmd* redircmd(struct cmd *subcmd, char *file, int type) {
-    struct redircmd *cmd = node_alloc(sizeof(*cmd));
+    struct redircmd *cmd = (struct redircmd*)node_alloc(sizeof(*cmd));
     memset(cmd, 0, sizeof(*cmd));
     cmd->type = REDIR;
     cmd->cmd = subcmd;
@@ -132,7 +142,7 @@ struct cmd* redircmd(struct cmd *subcmd, char *file, int type) {
     return (struct cmd*)cmd;
 }
 struct cmd* pipecmd(struct cmd *left, struct cmd *right) {
-    struct pipecmd *cmd = node_alloc(sizeof(*cmd));
+    struct pipecmd *cmd = (struct pipecmd*)node_alloc(sizeof(*cmd));
     memset(cmd, 0, sizeof(*cmd));
     cmd->type = PIPE;
     cmd->left = left;
@@ -140,7 +150,7 @@ struct cmd* pipecmd(struct cmd *left, struct cmd *right) {
     return (struct cmd*)cmd;
 }
 struct cmd* listcmd(struct cmd *left, struct cmd *right) {
-    struct listcmd *cmd = node_alloc(sizeof(*cmd));
+    struct listcmd *cmd = (struct listcmd*)node_alloc(sizeof(*cmd));
     memset(cmd, 0, sizeof(*cmd));
     cmd->type = LIST;
     cmd->left = left;
@@ -148,7 +158,7 @@ struct cmd* listcmd(struct cmd *left, struct cmd *right) {
     return (struct cmd*)cmd;
 }
 struct cmd* logiccmd(int type, struct cmd *left, struct cmd *right) {
-    struct logiccmd *cmd = node_alloc(sizeof(*cmd));
+    struct logiccmd *cmd = (struct logiccmd*)node_alloc(sizeof(*cmd));
     memset(cmd, 0, sizeof(*cmd));
     cmd->type = type;
     cmd->left = left;
@@ -194,7 +204,7 @@ struct cmd* parse_exec(void) {
         if(tok_type != T_WORD) user_panic("parse_exec syntax error: expected word");
         len = eq - q;
         cmd->argv[cmd->argc] = str_alloc(len + 1);
-        my_strncpy(cmd->argv[cmd->argc], q, len);
+        safe_strncpy(cmd->argv[cmd->argc], q, len + 1);
         cmd->argc++;
     }
     cmd->argv[cmd->argc] = 0;
@@ -208,8 +218,14 @@ struct cmd* parse_with_redir(void) {
             user_panic("syntax error: expected filename after redirection");
         int len = eq - q;
         char* file = str_alloc(len + 1);
-        my_strncpy(file, q, len);
-        cmd = redircmd(cmd, file, tok_type);
+        safe_strncpy(file, q, len + 1);
+        if (tok_type == '>') { // Simple redirection ">"
+             cmd = redircmd(cmd, file, T_REDIR_OUT);
+        } else if (tok_type == T_REDIR_APP) { // Append redirection ">>"
+             cmd = redircmd(cmd, file, T_REDIR_APP);
+        } else { // Input redirection "<"
+             cmd = redircmd(cmd, file, T_REDIR_IN);
+        }
     }
     return cmd;
 }
@@ -234,7 +250,7 @@ struct cmd* parse_list(void){
     struct cmd *cmd = parse_and_or();
     while(peek(ps, es, ";")){
         gettoken(&ps, es, 0, 0);
-        if (ps >= es) break;
+        if (ps >= es || *ps == '\0') break; // Stop if we hit end of string
         cmd = listcmd(cmd, parse_and_or());
     }
     return cmd;
@@ -251,15 +267,29 @@ struct cmd* parse_cmd(char *s) {
     return cmd;
 }
 
+// Forward declaration for handlers
+int handle_cd(int, char**);
+int handle_pwd(int, char**);
+int handle_declare(int, char**);
+int handle_unset(int, char**);
+int handle_history(int, char**);
+
 
 // --- Executor ---
 int run_cmd(struct cmd* cmd) {
     if (cmd == 0) return 0;
+    
     int p[2], status = 0;
     int r;
+    struct execcmd *ecmd;
+    struct redircmd *rcmd;
+    struct listcmd *lcmd;
+    struct pipecmd *pcmd;
+    struct logiccmd *logcmd;
+
     switch(cmd->type){
-    case EXEC: {
-        struct execcmd *ecmd = (struct execcmd*)cmd;
+    case EXEC:
+        ecmd = (struct execcmd*)cmd;
         if (ecmd->argv[0] == 0) return 0;
         if (strcmp(ecmd->argv[0], "cd") == 0) return handle_cd(ecmd->argc, ecmd->argv);
         if (strcmp(ecmd->argv[0], "pwd") == 0) return handle_pwd(ecmd->argc, ecmd->argv);
@@ -268,8 +298,6 @@ int run_cmd(struct cmd* cmd) {
         if (strcmp(ecmd->argv[0], "unset") == 0) return handle_unset(ecmd->argc, ecmd->argv);
         if (strcmp(ecmd->argv[0], "history") == 0) return handle_history(ecmd->argc, ecmd->argv);
         
-        // FIX: The shell ONLY resolves the path for the command itself.
-        // Arguments are passed to the child process unmodified.
         char prog_path_abs[MAXPATHLEN];
         resolve_path(ecmd->argv[0], prog_path_abs);
 
@@ -282,33 +310,38 @@ int run_cmd(struct cmd* cmd) {
         }
         if (r >= 0) status = wait(r);
         return status;
-    }
-    case REDIR: {
-        struct redircmd *rcmd = (struct redircmd*)cmd;
+
+    case REDIR:
+        rcmd = (struct redircmd*)cmd;
+        // Fork a child process to handle redirection
         if ((r = fork()) < 0) user_panic("fork failed");
-        if (r == 0) {
-            close(rcmd->fd);
+        if (r == 0) { // Child process
+            close(rcmd->fd); // Close standard in/out
             char resolved_file[MAXPATHLEN];
             resolve_path(rcmd->file, resolved_file);
-            if (open(resolved_file, rcmd->mode) < 0) {
+            int fd_opened = open(resolved_file, rcmd->mode); // Open the specified file
+            if (fd_opened < 0) {
                 printf("open %s failed\n", rcmd->file);
                 exit(1);
             }
+            // After setting up redirection, execute the sub-command
             status = run_cmd(rcmd->cmd);
             exit(status);
         }
+        // Parent waits for the child to complete
         status = wait(r);
         break;
-    }
-    case LIST: {
-        struct listcmd *lcmd = (struct listcmd*)cmd;
+
+    case LIST:
+        lcmd = (struct listcmd*)cmd;
         run_cmd(lcmd->left);
         status = run_cmd(lcmd->right);
         break;
-    }
-    case PIPE: {
-        struct pipecmd *pcmd = (struct pipecmd*)cmd;
+
+    case PIPE:
+        pcmd = (struct pipecmd*)cmd;
         if(pipe(p) < 0) user_panic("pipe failed");
+        
         int pid1;
         if((pid1 = fork()) == 0){
             close(1);
@@ -317,6 +350,7 @@ int run_cmd(struct cmd* cmd) {
             status = run_cmd(pcmd->left);
             exit(status);
         }
+        
         int pid2;
         if((pid2 = fork()) == 0){
             close(0);
@@ -325,23 +359,26 @@ int run_cmd(struct cmd* cmd) {
             status = run_cmd(pcmd->right);
             exit(status);
         }
+        
         close(p[0]); close(p[1]);
-        wait(pid1); status = wait(pid2);
+        wait(pid1); 
+        status = wait(pid2);
         break;
-    }
-    case AND: {
-        struct logiccmd *lcmd = (struct logiccmd*)cmd;
-        if (run_cmd(lcmd->left) == 0) status = run_cmd(lcmd->right);
+
+    case AND:
+        logcmd = (struct logiccmd*)cmd;
+        if (run_cmd(logcmd->left) == 0) status = run_cmd(logcmd->right);
         else status = 1;
         break;
-    }
-    case OR: {
-        struct logiccmd *lcmd = (struct logiccmd*)cmd;
-        if (run_cmd(lcmd->left) != 0) status = run_cmd(lcmd->right);
+
+    case OR:
+        logcmd = (struct logiccmd*)cmd;
+        if (run_cmd(logcmd->left) != 0) status = run_cmd(logcmd->right);
         else status = 0;
         break;
-    }
-    default: user_panic("unimplemented command type %d", cmd->type);
+
+    default: 
+        user_panic("unimplemented command type %d", cmd->type);
     }
     return status;
 }
@@ -353,18 +390,23 @@ void handle_backticks(char* dst, const char* src, int dst_size) {
     char *d_end = dst + dst_size - 1;
     while(*s && d < d_end) {
         if(*s != '`') { *d++ = *s++; continue; }
+        
         s++; // Skip the first '`'
         const char *sub_cmd_start = s;
         while(*s && *s != '`') s++;
+        
         if(!*s) { *d++ = '`'; s = sub_cmd_start; continue; }
+        
         char sub_cmd[BUF_MAX];
         int sub_len = s - sub_cmd_start;
-        my_strncpy(sub_cmd, sub_cmd_start, sub_len);
+        safe_strncpy(sub_cmd, sub_cmd_start, sub_len + 1);
         s++; // Skip the closing '`'
+        
         int p[2]; pipe(p);
         int pid;
         if ((pid = fork()) == 0) {
-            reset_pools();
+            // Child process for backtick execution
+            reset_pools(); // Use fresh pools for sub-command
             close(p[0]);
             dup(p[1], 1);
             close(p[1]);
@@ -372,26 +414,32 @@ void handle_backticks(char* dst, const char* src, int dst_size) {
             if (parsed_sub_cmd) run_cmd(parsed_sub_cmd);
             exit(0);
         }
+        
         close(p[1]);
         wait(pid);
+        
         char c;
+        int last_char_is_space = 0;
         while(d < d_end && read(p[0], &c, 1) > 0) {
-            if (c != '\n' && c != '\r') { *d++ = c; } 
-            else { *d++ = ' '; }
+            if (c == '\n' || c == '\r') {
+                if (!last_char_is_space) {
+                    *d++ = ' ';
+                    last_char_is_space = 1;
+                }
+            } else {
+                *d++ = c;
+                last_char_is_space = 0;
+            }
         }
-        if (d > dst && *(d-1) == ' ') d--;
+
+        if (d > dst && *(d-1) == ' ') d--; // Trim trailing space
+        
         close(p[0]);
     }
     *d = '\0';
 }
 
 // All other helper functions...
-int handle_cd(int, char**);
-int handle_pwd(int, char**);
-struct Var* find_var(const char*);
-struct Var* find_free_var_slot();
-int handle_declare(int, char**);
-int handle_unset(int, char**);
 void expand_vars(char*, const char*, int);
 void redraw_line(const char*);
 void insert_char(char);
@@ -401,7 +449,6 @@ char read_char();
 void readline_rich(const char*, char*);
 void add_to_history(const char*);
 void save_history();
-int handle_history(int, char**);
 int readline_from_fd(int, char*, int);
 void load_history();
 
@@ -450,12 +497,11 @@ int main() {
             run_cmd(parsed_cmd);
         }
     }
-
     return 0;
 }
 
 
-// --- Function Implementations (from previous versions) ---
+// --- Function Implementations ---
 int handle_cd(int argc, char **argv) {
     if (argc > 2) { 
         printf("Too many args for cd command\n"); 
@@ -475,7 +521,7 @@ int handle_cd(int argc, char **argv) {
     }
     strcpy(g_cwd, resolved);
     
-    // 保存工作目录到文件，供其他程序读取
+    // Save current working directory for other programs
     int fd = open("/.cwd", O_WRONLY | O_CREAT | O_TRUNC);
     if (fd >= 0) {
         write(fd, g_cwd, strlen(g_cwd));
@@ -508,20 +554,20 @@ int handle_declare(int argc, char **argv) {
     while(i < argc && argv[i][0] == '-') {
         for(int j = 1; argv[i][j] != '\0'; j++) {
             if (argv[i][j] == 'x') export_flag = 1;
-            if (argv[i][j] == 'r') readonly_flag = 1;
+            else if (argv[i][j] == 'r') readonly_flag = 1;
         }
         i++;
     }
     if (i >= argc) return 0;
-    char *eq_ptr = strchr(argv[i], '='), var_name[VAR_MAX_NAME_LEN + 1], var_value[VAR_MAX_VALUE_LEN + 1] = "";
+    char *eq_ptr = strchr(argv[i], '=');
+    char var_name[VAR_MAX_NAME_LEN + 1];
+    char var_value[VAR_MAX_VALUE_LEN + 1] = "";
     if (eq_ptr != NULL) {
-        int name_len = eq_ptr - argv[i]; if (name_len > VAR_MAX_NAME_LEN) name_len = VAR_MAX_NAME_LEN;
-        my_strncpy(var_name, argv[i], name_len);
-        const char* value_start = eq_ptr + 1; int value_len = strlen(value_start); if (value_len > VAR_MAX_VALUE_LEN) value_len = VAR_MAX_VALUE_LEN;
-        my_strncpy(var_value, value_start, value_len);
+        int name_len = eq_ptr - argv[i];
+        safe_strncpy(var_name, argv[i], name_len + 1);
+        safe_strncpy(var_value, eq_ptr + 1, VAR_MAX_VALUE_LEN + 1);
     } else {
-        int name_len = strlen(argv[i]); if (name_len > VAR_MAX_NAME_LEN) name_len = VAR_MAX_NAME_LEN;
-        my_strncpy(var_name, argv[i], name_len);
+        safe_strncpy(var_name, argv[i], VAR_MAX_NAME_LEN + 1);
     }
     struct Var *v = find_var(var_name);
     if (v != NULL) {
@@ -532,7 +578,8 @@ int handle_declare(int argc, char **argv) {
         if (v == NULL) { printf("declare: maximum number of variables reached\n"); return 1; }
         v->in_use = 1; strcpy(v->name, var_name); strcpy(v->value, var_value);
     }
-    if (export_flag) v->is_exported = 1; if (readonly_flag) v->is_readonly = 1;
+    if (export_flag) v->is_exported = 1; 
+    if (readonly_flag) v->is_readonly = 1;
     return 0;
 }
 int handle_unset(int argc, char **argv) {
@@ -585,46 +632,45 @@ void readline_rich(const char *prompt, char *dst_buf) {
     while (1) {
         char c = read_char();
         switch (c) {
-            case '\n': case '\r': strcpy(dst_buf, line_buffer); printf("\n"); return;
+            case '\n': case '\r': strcpy(dst_buf, line_buffer); return;
             case 0x7f: backspace_char(); break;
             case '\x1b':
                 if (read_char() == '[') {
                     char next_c = read_char();
-                     if (next_c == 'A') {
+                     if (next_c == 'A') { // Up arrow
                         if (history_pos > 0) {
-                            printf("\x1b[1B\r\x1b[K\x1b[1A");
-                            history_pos--; strcpy(line_buffer, history[history_pos]);
+                            history_pos--; 
+                            strcpy(line_buffer, history[history_pos % HISTFILESIZE]);
                             line_len = strlen(line_buffer); line_pos = line_len;
                         }
-                    } else if (next_c == 'B') {
+                    } else if (next_c == 'B') { // Down arrow
                         if (history_pos < history_count) {
-                            printf("\x1b[1A\r\x1b[K\x1b[1B");
                             history_pos++;
                             if (history_pos == history_count) line_buffer[0] = '\0';
-                            else strcpy(line_buffer, history[history_pos]);
+                            else strcpy(line_buffer, history[history_pos % HISTFILESIZE]);
                             line_len = strlen(line_buffer); line_pos = line_len;
                         }
-                    } else if (next_c == 'D' && line_pos > 0) line_pos--;
-                    else if (next_c == 'C' && line_pos < line_len) line_pos++;
+                    } else if (next_c == 'D' && line_pos > 0) line_pos--; // Left
+                    else if (next_c == 'C' && line_pos < line_len) line_pos++; // Right
                 }
                 break;
-            case 0x01: line_pos = 0; break;
-            case 0x05: line_pos = line_len; break;
-            case 0x0b: line_buffer[line_pos] = '\0'; line_len = line_pos; break;
-            case 0x15:
+            case 0x01: line_pos = 0; break; // Ctrl-A
+            case 0x05: line_pos = line_len; break; // Ctrl-E
+            case 0x0b: line_buffer[line_pos] = '\0'; line_len = line_pos; break; // Ctrl-K
+            case 0x15: // Ctrl-U
                 if(line_pos > 0){
-                    my_memmove(&line_buffer[0], &line_buffer[line_pos], line_len - line_pos);
-                    line_len -= line_pos; line_buffer[line_len] = '\0'; line_pos = 0;
+                    my_memmove(&line_buffer[0], &line_buffer[line_pos], line_len - line_pos + 1);
+                    line_len -= line_pos; line_pos = 0;
                 }
                 break;
-            case 0x17: {
+            case 0x17: { // Ctrl-W
                 int prev_pos = line_pos;
                 while (line_pos > 0 && line_buffer[line_pos - 1] == ' ') line_pos--;
                 while (line_pos > 0 && line_buffer[line_pos - 1] != ' ') line_pos--;
                 int num_to_delete = prev_pos - line_pos;
                 if(num_to_delete > 0){
-                    my_memmove(&line_buffer[line_pos], &line_buffer[prev_pos], line_len - prev_pos);
-                    line_len -= num_to_delete; line_buffer[line_len] = '\0';
+                    my_memmove(&line_buffer[line_pos], &line_buffer[prev_pos], line_len - prev_pos + 1);
+                    line_len -= num_to_delete;
                 }
                 break;
             }
@@ -637,49 +683,56 @@ void add_to_history(const char* cmd) {
     if (cmd[0] == '\0') return;
 	char *temp = (char*)cmd;
 	int is_space = 1;
-	while(*temp) {
-		if(*temp != ' ' && *temp != '\t') { is_space = 0; break; }
-		temp++;
-	}
+	while(*temp) { if(*temp != ' ' && *temp != '\t') { is_space = 0; break; } temp++; }
 	if(is_space) return;
     if (history_count > 0 && strcmp(history[(history_count - 1) % HISTFILESIZE], cmd) == 0) return;
-    strcpy(history[history_count % HISTFILESIZE], cmd);
-    history_count++;
-    // We save history after every command for persistence
+    
+    if (history_count >= HISTFILESIZE) {
+        // Shift history up
+        for(int i = 0; i < HISTFILESIZE - 1; i++) {
+            strcpy(history[i], history[i+1]);
+        }
+        strcpy(history[HISTFILESIZE - 1], cmd);
+    } else {
+        strcpy(history[history_count], cmd);
+        history_count++;
+    }
     save_history();
 }
+
 void save_history() {
     int fd;
 	if ((fd = open("/.mos_history", O_WRONLY | O_CREAT | O_TRUNC)) < 0) return;
-	int start = (history_count > HISTFILESIZE) ? (history_count - HISTFILESIZE) : 0;
-	for (int i = start; i < history_count; i++) {
-		write(fd, history[i % HISTFILESIZE], strlen(history[i % HISTFILESIZE]));
+	for (int i = 0; i < history_count; i++) {
+		write(fd, history[i], strlen(history[i]));
 		write(fd, "\n", 1);
 	}
 	close(fd);
 }
+
 int handle_history(int argc, char **argv) {
     if (argc > 1) { printf("history: too many arguments\n"); return 1; }
-    int start = (history_count > HISTFILESIZE) ? (history_count - HISTFILESIZE) : 0;
-    for (int i = start; i < history_count; i++) printf("  %d\t%s\n", i + 1, history[i % HISTFILESIZE]);
+    for (int i = 0; i < history_count; i++) printf("  %d\t%s\n", i + 1, history[i]);
     return 0;
 }
 int readline_from_fd(int fd, char *buf, int size) {
     int i = 0; char c = 0;
     while (i < size - 1) {
         if (read(fd, &c, 1) != 1) { i = -1; break; }
-        if (c == '\n') break;
+        if (c == '\n' || c == '\r') break;
         buf[i++] = c;
     }
-    buf[i] = '\0';
-    return (i == -1) ? -1 : i;
+    if (i >= 0) buf[i] = '\0';
+    return i;
 }
 void load_history() {
     int fd = open("/.mos_history", O_RDONLY);
     if (fd < 0) return;
-    while(1){
-        if (readline_from_fd(fd, history[history_count % HISTFILESIZE], BUF_MAX) < 0) break;
-        if (history[history_count % HISTFILESIZE][0] != '\0') history_count++;
+    history_count = 0;
+    while(history_count < HISTFILESIZE) {
+        if (readline_from_fd(fd, history[history_count], BUF_MAX) < 0) break;
+        if (history[history_count][0] != '\0') history_count++;
+        else break;
     }
     close(fd);
 }
