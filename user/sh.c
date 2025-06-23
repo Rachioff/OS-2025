@@ -263,6 +263,27 @@ struct cmd* parse_cmd(char *s) {
     return cmd;
 }
 
+int try_spawn_and_wait(char *prog, const char **argv) {
+    int r;
+    char path_with_b[MAXPATHLEN];
+
+    // Try without .b suffix
+    if ((r = spawn(prog, argv)) >= 0) {
+        if (r == 0) return 0; // Child process of fork, should not happen in spawn's parent
+        return wait(r);
+    }
+
+    // Try with .b suffix
+    strcpy(path_with_b, prog);
+    strcat(path_with_b, ".b");
+    if ((r = spawn(path_with_b, argv)) >= 0) {
+        if (r == 0) return 0;
+        return wait(r);
+    }
+
+    return -1; // Not found
+}
+
 // Forward declaration for handlers
 int handle_cd(int, char**);
 int handle_pwd(int, char**);
@@ -293,19 +314,28 @@ int run_cmd(struct cmd* cmd) {
         if (strcmp(ecmd->argv[0], "declare") == 0) return handle_declare(ecmd->argc, ecmd->argv);
         if (strcmp(ecmd->argv[0], "unset") == 0) return handle_unset(ecmd->argc, ecmd->argv);
         if (strcmp(ecmd->argv[0], "history") == 0) return handle_history(ecmd->argc, ecmd->argv);
-        
-        char prog_path_abs[MAXPATHLEN];
-        resolve_path(ecmd->argv[0], prog_path_abs);
 
-        if ((r = spawn(prog_path_abs, (const char**)ecmd->argv)) < 0) {
-            strcat(prog_path_abs, ".b");
-            if ((r = spawn(prog_path_abs, (const char**)ecmd->argv)) < 0) {
-                printf("command not found: %s\n", ecmd->argv[0]);
-                return -1;
+        // --- Replace the old spawn logic with the following ---
+        char path_to_try[MAXPATHLEN];
+        int spawn_status;
+
+        // `resolve_path` handles absolute paths, and paths relative to g_cwd.
+        resolve_path(ecmd->argv[0], path_to_try);
+        if ((spawn_status = try_spawn_and_wait(path_to_try, (const char**)ecmd->argv)) >= 0) {
+            return spawn_status;
+        }
+
+        // If it was a relative command and it failed, try searching from the root directory.
+        if (ecmd->argv[0][0] != '/') {
+            strcpy(path_to_try, "/");
+            strcat(path_to_try, ecmd->argv[0]);
+            if ((spawn_status = try_spawn_and_wait(path_to_try, (const char**)ecmd->argv)) >= 0) {
+                return spawn_status;
             }
         }
-        if (r >= 0) status = wait(r);
-        return status;
+
+        printf("command not found: %s\n", ecmd->argv[0]);
+        return 1; // Return non-zero for command not found
 
     case REDIR:
         rcmd = (struct redircmd*)cmd;
@@ -462,6 +492,17 @@ int main() {
         vars[i].in_use = 0;
     }
 
+    int fd_cwd;
+    if ((fd_cwd = open("/.cwd", O_RDONLY)) >= 0) {
+        char cwd_buf[MAXPATHLEN];
+        int n = read(fd_cwd, cwd_buf, sizeof(cwd_buf) - 1);
+        if (n > 0) {
+            cwd_buf[n] = '\0';
+            strcpy(g_cwd, cwd_buf);
+        }
+        close(fd_cwd);
+    }
+
     load_history();
 
     printf("\n"); 
@@ -590,10 +631,10 @@ void expand_vars(char* dst, const char* src, int dst_size) {
     while (*s && d < d_end) {
         if (*s != '$') { *d++ = *s++; continue; }
         s++; char var_name[VAR_MAX_NAME_LEN + 1]; int name_len = 0;
-        char c = *s; int is_alnum = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'));
+        char c = *s; int is_alnum = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_');
         while (is_alnum && name_len < VAR_MAX_NAME_LEN) {
             var_name[name_len++] = *s++; c = *s;
-            is_alnum = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'));
+            is_alnum = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_');
         }
         var_name[name_len] = '\0';
         if (name_len > 0) {
@@ -621,33 +662,51 @@ void delete_char() {
 }
 void backspace_char() { if (line_pos > 0) { line_pos--; delete_char(); } }
 char read_char() { char c; if (read(0, &c, 1) != 1) return 0; return c; }
+
 void readline_rich(const char *prompt, char *dst_buf) {
     history_pos = history_count;
     line_len = 0; line_pos = 0; line_buffer[0] = '\0';
+
+    char current_command[BUF_MAX];
+    current_command[0] = '\0';
+
     redraw_line(prompt);
     while (1) {
         char c = read_char();
         switch (c) {
-            case '\n': case '\r': strcpy(dst_buf, line_buffer); return;
+            case '\n': case '\r': 
+                strcpy(dst_buf, line_buffer); 
+                return;
             case 0x7f: backspace_char(); break;
             case '\x1b':
                 if (read_char() == '[') {
                     char next_c = read_char();
                      if (next_c == 'A') { // Up arrow
+                        if (history_pos == history_count) {
+                            strcpy(current_command, line_buffer);
+                        }
                         if (history_pos > 0) {
                             history_pos--; 
-                            strcpy(line_buffer, history[history_pos % HISTFILESIZE]);
-                            line_len = strlen(line_buffer); line_pos = line_len;
+                            strcpy(line_buffer, history[history_pos]);
+                            line_len = strlen(line_buffer); 
+                            line_pos = line_len;
                         }
                     } else if (next_c == 'B') { // Down arrow
                         if (history_pos < history_count) {
                             history_pos++;
-                            if (history_pos == history_count) line_buffer[0] = '\0';
-                            else strcpy(line_buffer, history[history_pos % HISTFILESIZE]);
-                            line_len = strlen(line_buffer); line_pos = line_len;
+                            if (history_pos == history_count) {
+                                strcpy(line_buffer, current_command);
+                            } else {
+                                strcpy(line_buffer, history[history_pos]);
+                            }
+                            line_len = strlen(line_buffer); 
+                            line_pos = line_len;
                         }
-                    } else if (next_c == 'D' && line_pos > 0) line_pos--; // Left
-                    else if (next_c == 'C' && line_pos < line_len) line_pos++; // Right
+                    } else if (next_c == 'D' && line_pos > 0) { // Left
+                        line_pos--; 
+                    } else if (next_c == 'C' && line_pos < line_len) { // Right
+                        line_pos++; 
+                    }
                 }
                 break;
             case 0x01: line_pos = 0; break; // Ctrl-A
@@ -675,6 +734,7 @@ void readline_rich(const char *prompt, char *dst_buf) {
         redraw_line(prompt);
     }
 }
+
 void add_to_history(const char* cmd) {
     if (cmd[0] == '\0') return;
 	char *temp = (char*)cmd;

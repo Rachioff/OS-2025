@@ -2,6 +2,30 @@
 
 // 全局变量存储当前工作目录
 char g_cwd[MAXPATHLEN] = "/";
+static int cwd_initialized = 0;
+int open(const char *path, int mode);
+int read(int fd, void *buf, u_int nbytes);
+int close(int fd);
+
+void init_cwd(void) {
+	if (cwd_initialized) {
+		return;
+	}
+	// 立即设置标志位，以防止 open() -> resolve_path() -> init_cwd() 造成的无限递归
+	cwd_initialized = 1; 
+
+	int fd;
+	// 尝试从 /.cwd 文件读取并覆盖默认的 "/"
+	if ((fd = open("/.cwd", O_RDONLY)) >= 0) {
+		char buf[MAXPATHLEN];
+		int n = read(fd, buf, sizeof(buf) - 1);
+		if (n > 0) {
+			buf[n] = '\0';
+			strcpy(g_cwd, buf);
+		}
+		close(fd);
+	}
+}
 
 // 实现 strcat 函数
 char* my_strcat(char* dest, const char* src) {
@@ -24,6 +48,7 @@ void safe_strncpy(char *dst, const char *src, int n) {
 
 // 解析路径（相对路径转绝对路径）
 void resolve_path(const char *path, char *resolved_path) {
+    init_cwd();
     char temp_path[MAXPATHLEN], temp_path_copy[MAXPATHLEN];
     
     if (path[0] == '/') {

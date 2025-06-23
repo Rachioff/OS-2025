@@ -7,6 +7,7 @@ static int file_close(struct Fd *fd);
 static int file_read(struct Fd *fd, void *buf, u_int n, u_int offset);
 static int file_write(struct Fd *fd, const void *buf, u_int n, u_int offset);
 static int file_stat(struct Fd *fd, struct Stat *stat);
+void resolve_path(const char *path, char *resolved_path);
 
 // Dot represents choosing the member within the struct declaration
 // to initialize, with no need to consider the order of members.
@@ -254,9 +255,10 @@ int ftruncate(int fdnum, u_int size) {
 //  Delete a file or directory.
 int remove(const char *path) {
 	// Call fsipc_remove.
-
+	char absolute_path[MAXPATHLEN];
+	resolve_path(path, absolute_path);
 	/* Exercise 5.13: Your code here. */
-	return fsipc_remove(path);
+	return fsipc_remove(absolute_path);
 }
 
 // Overview:
