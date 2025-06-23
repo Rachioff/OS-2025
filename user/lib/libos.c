@@ -17,8 +17,8 @@ void libmain(int argc, char **argv) {
 	env = &envs[ENVX(syscall_getenvid())];
 
 	// call user main routine
-	main(argc, argv);
+	int ret = main(argc, argv);
 
 	// exit gracefully
-	exit(1);
+	exit(ret);
 }
