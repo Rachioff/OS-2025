@@ -226,13 +226,12 @@ struct cmd* parse_with_redir(void) {
 }
 struct cmd* parse_pipe(void) {
     struct cmd *cmd = parse_with_redir();
-    if(peek(ps, es, "|")){
+    char* next_char = ps;
+    while(*next_char && strchr(" \t\r\n", *next_char)) next_char++;
+    
+    if (*next_char == '|' && *(next_char + 1) != '|') {
         gettoken(&ps, es, 0, 0);
-        if (*ps == '|') { // It was '||', put it back
-            ps--; cmd = logiccmd(OR, cmd, parse_pipe());
-        } else {
-            cmd = pipecmd(cmd, parse_pipe());
-        }
+        cmd = pipecmd(cmd, parse_pipe());
     }
     return cmd;
 }
@@ -412,52 +411,80 @@ void handle_backticks(char* dst, const char* src, int dst_size) {
     const char *s = src;
     char *d = dst;
     char *d_end = dst + dst_size - 1;
+
     while(*s && d < d_end) {
-        if(*s != '`') { *d++ = *s++; continue; }
+        if(*s != '`') {
+            *d++ = *s++;
+            continue;
+        }
         
+        // 遇到第一个反引号，开始寻找匹配的第二个
         s++;
         const char *sub_cmd_start = s;
-        while(*s && *s != '`') s++;
+        while(*s && *s != '`') {
+            s++;
+        }
         
-        if(!*s) { *d++ = '`'; s = sub_cmd_start; continue; }
+        // 如果没有找到匹配的结束反引号，则将第一个反引号当作普通字符处理
+        if(!*s) {
+            *d++ = '`';
+            s = sub_cmd_start;
+            continue;
+        }
         
+        // 提取子命令
         char sub_cmd[BUF_MAX];
         int sub_len = s - sub_cmd_start;
         safe_strncpy(sub_cmd, sub_cmd_start, sub_len + 1);
-        s++;
+        s++; // 跳过第二个反引号
         
-        int p[2]; pipe(p);
+        // --- 执行子命令并捕获输出 ---
+        int p[2];
+        if (pipe(p) < 0) user_panic("pipe failed");
+
         int pid;
         if ((pid = fork()) == 0) {
+            // 子进程: 将标准输出重定向到管道的写端
             reset_pools();
-            close(p[0]);
-            dup(p[1], 1);
+            close(p[0]); // 关闭读端
+            dup(p[1], 1);  // 复制写端到 stdout
             close(p[1]);
+            
             struct cmd* parsed_sub_cmd = parse_cmd(sub_cmd);
-            if (parsed_sub_cmd) run_cmd(parsed_sub_cmd);
+            if (parsed_sub_cmd) {
+                run_cmd(parsed_sub_cmd);
+            }
             exit(0);
         }
         
-        close(p[1]);
+        // 父进程: 从管道的读端读取子命令的输出
+        close(p[1]); // 关闭写端
         
-        char c;
-        int last_char_is_space = (d > dst && *(d-1) == ' ');
-        while(d < d_end && read(p[0], &c, 1) > 0) {
-            if (c == '\n' || c == '\r' || c == ' ' || c == '\t') {
-                if (!last_char_is_space) {
-                    *d++ = ' ';
-                    last_char_is_space = 1;
-                }
-            } else {
-                *d++ = c;
-                last_char_is_space = 0;
-            }
+        // 将输出读入一个临时缓冲区
+        char sub_output_buf[BUF_MAX * 2]; // 使用一个足够大的缓冲区
+        int bytes_read = 0;
+        int n;
+        while (bytes_read < sizeof(sub_output_buf) - 1 && 
+               (n = read(p[0], sub_output_buf + bytes_read, sizeof(sub_output_buf) - 1 - bytes_read)) > 0) {
+            bytes_read += n;
         }
-
-        if (d > dst && *(d-1) == ' ') d--;
+        sub_output_buf[bytes_read] = '\0';
         
         close(p[0]);
         wait(pid);
+        
+        // --- 处理输出：只移除末尾的换行符 ---
+        int len = strlen(sub_output_buf);
+        while (len > 0 && (sub_output_buf[len - 1] == '\n' || sub_output_buf[len - 1] == '\r')) {
+            len--;
+        }
+        sub_output_buf[len] = '\0';
+
+        // --- 将处理后的结果复制到主命令缓冲区 ---
+        char* sub_out_ptr = sub_output_buf;
+        while(*sub_out_ptr && d < d_end) {
+            *d++ = *sub_out_ptr++;
+        }
     }
     *d = '\0';
 }
@@ -698,6 +725,7 @@ void readline_rich(const char *prompt, char *dst_buf) {
             case '\n': case '\r': 
                 strcpy(dst_buf, line_buffer); 
                 return;
+            case '\b':
             case 0x7f: backspace_char(); break;
             case '\x1b':
                 if (read_char() == '[') {
