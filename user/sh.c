@@ -33,9 +33,12 @@ struct Var vars[MAX_VARS];
 #define BUF_MAX 1024
 char line_buffer[BUF_MAX];
 int line_len = 0, line_pos = 0;
+
 #define HISTFILESIZE 20
 char history[HISTFILESIZE][BUF_MAX];
-int history_count = 0, history_pos = 0;
+int history_count = 0; // 当前历史记录数量
+int history_pos = 0;   // 导航时的逻辑位置
+int history_start = 0; // 循环缓冲区的起始物理索引
 
 
 // --- START: AST Parser and Executor ---
@@ -67,8 +70,6 @@ struct pipecmd { int type; struct cmd *left; struct cmd *right; };
 struct listcmd { int type; struct cmd *left; struct cmd *right; };
 struct logiccmd { int type; struct cmd *left; struct cmd *right; };
 
-
-// --- FIX: 使用union来定义内存池，确保大小正确 ---
 union cmd_union {
     struct execcmd exe;
     struct redircmd redir;
@@ -91,10 +92,8 @@ void reset_pools() {
     next_str_pos = 0;
 }
 
-// --- FIX: node_alloc现在可以正确工作，因为它总是分配一个足够大的union块 ---
 void* node_alloc(int size) {
     if(next_cmd_node >= CMD_POOL_SIZE) user_panic("AST node pool exhausted");
-    // size参数被忽略，因为我们总是分配一个union大小的块
     return &cmd_pool[next_cmd_node++];
 }
 
@@ -107,12 +106,12 @@ char* str_alloc(int n) {
 
 // Parser state
 char *ps, *es;
-int tok;
 char *q, *eq;
 
 // --- Forward declarations for parser ---
 struct cmd* parse_cmd(char*s);
-struct cmd* parse_line(void);
+struct cmd* parse_list(void);
+struct cmd* parse_and_or(void);
 struct cmd* parse_pipe(void);
 struct cmd* parse_with_redir(void);
 struct cmd* parse_exec(void);
@@ -215,11 +214,11 @@ struct cmd* parse_with_redir(void) {
         int len = eq - q;
         char* file = str_alloc(len + 1);
         safe_strncpy(file, q, len + 1);
-        if (tok_type == '>') { // Simple redirection ">"
+        if (tok_type == '>') { 
              cmd = redircmd(cmd, file, T_REDIR_OUT);
-        } else if (tok_type == T_REDIR_APP) { // Append redirection ">>"
+        } else if (tok_type == T_REDIR_APP) { 
              cmd = redircmd(cmd, file, T_REDIR_APP);
-        } else { // Input redirection "<"
+        } else {
              cmd = redircmd(cmd, file, T_REDIR_IN);
         }
     }
@@ -229,7 +228,11 @@ struct cmd* parse_pipe(void) {
     struct cmd *cmd = parse_with_redir();
     if(peek(ps, es, "|")){
         gettoken(&ps, es, 0, 0);
-        cmd = pipecmd(cmd, parse_pipe());
+        if (*ps == '|') { // It was '||', put it back
+            ps--; cmd = logiccmd(OR, cmd, parse_pipe());
+        } else {
+            cmd = pipecmd(cmd, parse_pipe());
+        }
     }
     return cmd;
 }
@@ -246,7 +249,7 @@ struct cmd* parse_list(void){
     struct cmd *cmd = parse_and_or();
     while(peek(ps, es, ";")){
         gettoken(&ps, es, 0, 0);
-        if (ps >= es || *ps == '\0') break; // Stop if we hit end of string
+        if (ps >= es || *ps == '\0') break;
         cmd = listcmd(cmd, parse_and_or());
     }
     return cmd;
@@ -267,21 +270,19 @@ int try_spawn_and_wait(char *prog, const char **argv) {
     int r;
     char path_with_b[MAXPATHLEN];
 
-    // Try without .b suffix
     if ((r = spawn(prog, argv)) >= 0) {
-        if (r == 0) return 0; // Child process of fork, should not happen in spawn's parent
+        if (r == 0) return 0;
         return wait(r);
     }
 
-    // Try with .b suffix
-    strcpy(path_with_b, prog);
+    safe_strncpy(path_with_b, prog, sizeof(path_with_b));
     strcat(path_with_b, ".b");
     if ((r = spawn(path_with_b, argv)) >= 0) {
         if (r == 0) return 0;
         return wait(r);
     }
 
-    return -1; // Not found
+    return -1;
 }
 
 // Forward declaration for handlers
@@ -290,7 +291,8 @@ int handle_pwd(int, char**);
 int handle_declare(int, char**);
 int handle_unset(int, char**);
 int handle_history(int, char**);
-
+void save_environment();
+void load_environment();
 
 // --- Executor ---
 int run_cmd(struct cmd* cmd) {
@@ -317,17 +319,14 @@ int run_cmd(struct cmd* cmd) {
 
         save_environment();
 
-        // --- Replace the old spawn logic with the following ---
         char path_to_try[MAXPATHLEN];
         int spawn_status;
 
-        // `resolve_path` handles absolute paths, and paths relative to g_cwd.
         resolve_path(ecmd->argv[0], path_to_try);
         if ((spawn_status = try_spawn_and_wait(path_to_try, (const char**)ecmd->argv)) >= 0) {
             return spawn_status;
         }
 
-        // If it was a relative command and it failed, try searching from the root directory.
         if (ecmd->argv[0][0] != '/') {
             strcpy(path_to_try, "/");
             strcat(path_to_try, ecmd->argv[0]);
@@ -337,26 +336,23 @@ int run_cmd(struct cmd* cmd) {
         }
 
         printf("command not found: %s\n", ecmd->argv[0]);
-        return 1; // Return non-zero for command not found
+        return 1;
 
     case REDIR:
         rcmd = (struct redircmd*)cmd;
-        // Fork a child process to handle redirection
         if ((r = fork()) < 0) user_panic("fork failed");
-        if (r == 0) { // Child process
-            close(rcmd->fd); // Close standard in/out
+        if (r == 0) {
+            close(rcmd->fd);
             char resolved_file[MAXPATHLEN];
             resolve_path(rcmd->file, resolved_file);
-            int fd_opened = open(resolved_file, rcmd->mode); // Open the specified file
+            int fd_opened = open(resolved_file, rcmd->mode);
             if (fd_opened < 0) {
                 printf("open %s failed\n", rcmd->file);
                 exit(1);
             }
-            // After setting up redirection, execute the sub-command
             status = run_cmd(rcmd->cmd);
             exit(status);
         }
-        // Parent waits for the child to complete
         status = wait(r);
         break;
 
@@ -395,14 +391,14 @@ int run_cmd(struct cmd* cmd) {
 
     case AND:
         logcmd = (struct logiccmd*)cmd;
-        if (run_cmd(logcmd->left) == 0) status = run_cmd(logcmd->right);
-        else status = 1;
+        status = run_cmd(logcmd->left);
+        if (status == 0) status = run_cmd(logcmd->right);
         break;
 
     case OR:
         logcmd = (struct logiccmd*)cmd;
-        if (run_cmd(logcmd->left) != 0) status = run_cmd(logcmd->right);
-        else status = 0;
+        status = run_cmd(logcmd->left);
+        if (status != 0) status = run_cmd(logcmd->right);
         break;
 
     default: 
@@ -419,7 +415,7 @@ void handle_backticks(char* dst, const char* src, int dst_size) {
     while(*s && d < d_end) {
         if(*s != '`') { *d++ = *s++; continue; }
         
-        s++; // Skip the first '`'
+        s++;
         const char *sub_cmd_start = s;
         while(*s && *s != '`') s++;
         
@@ -428,13 +424,12 @@ void handle_backticks(char* dst, const char* src, int dst_size) {
         char sub_cmd[BUF_MAX];
         int sub_len = s - sub_cmd_start;
         safe_strncpy(sub_cmd, sub_cmd_start, sub_len + 1);
-        s++; // Skip the closing '`'
+        s++;
         
         int p[2]; pipe(p);
         int pid;
         if ((pid = fork()) == 0) {
-            // Child process for backtick execution
-            reset_pools(); // Use fresh pools for sub-command
+            reset_pools();
             close(p[0]);
             dup(p[1], 1);
             close(p[1]);
@@ -446,9 +441,9 @@ void handle_backticks(char* dst, const char* src, int dst_size) {
         close(p[1]);
         
         char c;
-        int last_char_is_space = 0;
+        int last_char_is_space = (d > dst && *(d-1) == ' ');
         while(d < d_end && read(p[0], &c, 1) > 0) {
-            if (c == '\n' || c == '\r') {
+            if (c == '\n' || c == '\r' || c == ' ' || c == '\t') {
                 if (!last_char_is_space) {
                     *d++ = ' ';
                     last_char_is_space = 1;
@@ -459,7 +454,7 @@ void handle_backticks(char* dst, const char* src, int dst_size) {
             }
         }
 
-        if (d > dst && *(d-1) == ' ') d--; // Trim trailing space
+        if (d > dst && *(d-1) == ' ') d--;
         
         close(p[0]);
         wait(pid);
@@ -564,7 +559,6 @@ int handle_cd(int argc, char **argv) {
     }
     strcpy(g_cwd, resolved);
     
-    // Save current working directory for other programs
     int fd = open("/.cwd", O_WRONLY | O_CREAT | O_TRUNC);
     if (fd >= 0) {
         write(fd, g_cwd, strlen(g_cwd));
@@ -651,32 +645,53 @@ void expand_vars(char* dst, const char* src, int dst_size) {
     *d = '\0';
 }
 void redraw_line(const char *prompt) {
-    printf("\r\x1b[K"); printf("%s%s", prompt, line_buffer); printf("\r\x1b[%dC", (int)(strlen(prompt) + line_pos));
+    printf("\x1b[G\x1b[K");
+
+    printf("%s%s", prompt, line_buffer);
+
+    int prompt_len = strlen(prompt);
+    printf("\x1b[%dG", prompt_len + line_pos + 1);
 }
 void insert_char(char c) {
     if (line_len < BUF_MAX - 1) {
         my_memmove(&line_buffer[line_pos + 1], &line_buffer[line_pos], line_len - line_pos);
         line_buffer[line_pos] = c;
-        line_len++; line_pos++; line_buffer[line_len] = '\0';
+        line_len++;
+        line_pos++;
+        line_buffer[line_len] = '\0';
     }
 }
 void delete_char() {
     if (line_pos < line_len) {
-        my_memmove(&line_buffer[line_pos], &line_buffer[line_pos + 1], line_len - line_pos - 1);
-        line_len--; line_buffer[line_len] = '\0';
+        my_memmove(&line_buffer[line_pos], &line_buffer[line_pos + 1], line_len - line_pos);
+        line_len--;
     }
 }
-void backspace_char() { if (line_pos > 0) { line_pos--; delete_char(); } }
-char read_char() { char c; if (read(0, &c, 1) != 1) return 0; return c; }
+void backspace_char() {
+    if (line_pos > 0) {
+        line_pos--;
+        delete_char();
+    }
+}
+char read_char() { char c; if (read(0, &c, 1) != 1) c = 0; return c; }
 
 void readline_rich(const char *prompt, char *dst_buf) {
+    // 指向历史记录的指针现在直接使用全局的 history_pos。
+    // 在进入行编辑前，保存原始行，以便用户可以从历史导航中返回到他最初输入的内容。
+    char original_line[BUF_MAX];
+    strcpy(original_line, line_buffer); 
+
+    // 将导航指针设置到历史记录的末尾（即新的空行）。
     history_pos = history_count;
     line_len = 0; line_pos = 0; line_buffer[0] = '\0';
-
-    char current_command[BUF_MAX];
-    current_command[0] = '\0';
+    
+    // 我们需要在历史记录的“末尾”存储用户当前正在输入的行。
+    // 我们直接使用 history 数组的下一个可用槽位，但要小心不改变 history_count。
+    int current_line_idx = (history_start + history_count) % HISTFILESIZE;
+    strcpy(history[current_line_idx], ""); // 逻辑上的“新行”
 
     redraw_line(prompt);
+
     while (1) {
         char c = read_char();
         switch (c) {
@@ -686,38 +701,42 @@ void readline_rich(const char *prompt, char *dst_buf) {
             case 0x7f: backspace_char(); break;
             case '\x1b':
                 if (read_char() == '[') {
+                    // 在导航之前，将当前行的任何修改写回它在全局 history 数组中的位置。
+                    int C_idx = (history_start + history_pos) % HISTFILESIZE;
+                    strcpy(history[C_idx], line_buffer);
+
                     char next_c = read_char();
-                     if (next_c == 'A') { // Up arrow
-                        if (history_pos == history_count) {
-                            strcpy(current_command, line_buffer);
-                        }
+                     if (next_c == 'A') { // 上箭头
+                        printf("\x1b[B"); // 终端行为补偿
                         if (history_pos > 0) {
-                            history_pos--; 
-                            strcpy(line_buffer, history[history_pos]);
+                            history_pos--;
+                            int p_idx = (history_start + history_pos) % HISTFILESIZE;
+                            strcpy(line_buffer, history[p_idx]);
                             line_len = strlen(line_buffer); 
                             line_pos = line_len;
                         }
-                    } else if (next_c == 'B') { // Down arrow
+                    } else if (next_c == 'B') { // 下箭头
                         if (history_pos < history_count) {
                             history_pos++;
-                            if (history_pos == history_count) {
-                                strcpy(line_buffer, current_command);
-                            } else {
-                                strcpy(line_buffer, history[history_pos]);
-                            }
+                            int n_idx = (history_start + history_pos) % HISTFILESIZE;
+                            strcpy(line_buffer, history[n_idx]);
                             line_len = strlen(line_buffer); 
                             line_pos = line_len;
                         }
-                    } else if (next_c == 'D' && line_pos > 0) { // Left
+                    } else if (next_c == 'D' && line_pos > 0) { // 左
                         line_pos--; 
-                    } else if (next_c == 'C' && line_pos < line_len) { // Right
+                    } else if (next_c == 'C' && line_pos < line_len) { // 右
                         line_pos++; 
                     }
                 }
                 break;
-            case 0x01: line_pos = 0; break; // Ctrl-A
-            case 0x05: line_pos = line_len; break; // Ctrl-E
-            case 0x0b: line_buffer[line_pos] = '\0'; line_len = line_pos; break; // Ctrl-K
+            // ... 其他快捷键保持不变 ...
+            case 0x01: line_pos = 0; break;
+            case 0x05: line_pos = line_len; break;
+            case 0x0b: 
+                line_buffer[line_pos] = '\0';
+                line_len = line_pos;
+                break;
             case 0x15: // Ctrl-U
                 if(line_pos > 0){
                     my_memmove(&line_buffer[0], &line_buffer[line_pos], line_len - line_pos + 1);
@@ -743,21 +762,21 @@ void readline_rich(const char *prompt, char *dst_buf) {
 
 void add_to_history(const char* cmd) {
     if (cmd[0] == '\0') return;
-	char *temp = (char*)cmd;
-	int is_space = 1;
-	while(*temp) { if(*temp != ' ' && *temp != '\t') { is_space = 0; break; } temp++; }
-	if(is_space) return;
-    if (history_count > 0 && strcmp(history[(history_count - 1) % HISTFILESIZE], cmd) == 0) return;
-    
-    if (history_count >= HISTFILESIZE) {
-        // Shift history up
-        for(int i = 0; i < HISTFILESIZE - 1; i++) {
-            strcpy(history[i], history[i+1]);
-        }
-        strcpy(history[HISTFILESIZE - 1], cmd);
-    } else {
-        strcpy(history[history_count], cmd);
+    char *temp = (char*)cmd;
+    int is_space = 1;
+    while(*temp) { if(*temp != ' ' && *temp != '\t') { is_space = 0; break; } temp++; }
+    if(is_space) return;
+
+    int last_idx = (history_start + history_count - 1) % HISTFILESIZE;
+    if (history_count > 0 && strcmp(history[last_idx], cmd) == 0) return;
+
+    int new_idx = (history_start + history_count) % HISTFILESIZE;
+    strcpy(history[new_idx], cmd);
+
+    if (history_count < HISTFILESIZE) {
         history_count++;
+    } else {
+        history_start = (history_start + 1) % HISTFILESIZE;
     }
     save_history();
 }
@@ -766,7 +785,8 @@ void save_history() {
     int fd;
 	if ((fd = open("/.mos_history", O_WRONLY | O_CREAT | O_TRUNC)) < 0) return;
 	for (int i = 0; i < history_count; i++) {
-		write(fd, history[i], strlen(history[i]));
+        int idx = (history_start + i) % HISTFILESIZE;
+		write(fd, history[idx], strlen(history[idx]));
 		write(fd, "\n", 1);
 	}
 	close(fd);
@@ -774,35 +794,32 @@ void save_history() {
 
 int handle_history(int argc, char **argv) {
     if (argc > 1) { printf("history: too many arguments\n"); return 1; }
-    for (int i = 0; i < history_count; i++) printf("  %d\t%s\n", i + 1, history[i]);
+    for (int i = 0; i < history_count; i++) {
+        int idx = (history_start + i) % HISTFILESIZE;
+        printf("%s\n", history[idx]);
+    }
     return 0;
 }
 
 void save_environment() {
     int fd;
-    // 打开环境变量文件，如果不存在则创建，如果存在则清空
     if ((fd = open("/.mos_env", O_WRONLY | O_CREAT | O_TRUNC)) < 0) {
-        return; // 打开文件失败，无法保存环境变量
+        return;
     }
 
     for (int i = 0; i < MAX_VARS; i++) {
-        // 只保存那些正在使用且被标记为可导出的变量
         if (vars[i].in_use && vars[i].is_exported) {
-            // 预留足够的空间: "r:name=value\n\0"
             char line_buf[VAR_MAX_NAME_LEN + VAR_MAX_VALUE_LEN + 4];
             
-            // 格式化输出: 第一个字符表示是否只读 ('r' 或 'n')
             line_buf[0] = vars[i].is_readonly ? 'r' : 'n';
             line_buf[1] = ':';
             line_buf[2] = '\0';
             
-            // 拼接变量名、等号和值
             strcat(line_buf, vars[i].name);
             strcat(line_buf, "=");
             strcat(line_buf, vars[i].value);
             strcat(line_buf, "\n");
             
-            // 写入文件
             write(fd, line_buf, strlen(line_buf));
         }
     }
@@ -811,29 +828,24 @@ void save_environment() {
 
 void load_environment() {
     int fd;
-    // 只读方式打开环境变量文件
     if ((fd = open("/.mos_env", O_RDONLY)) < 0) {
-        return; // 文件不存在，说明没有可加载的环境变量
+        return;
     }
     
     char line[BUF_MAX];
-    // 使用现有的 readline_from_fd 逐行读取
     while (readline_from_fd(fd, line, sizeof(line)) >= 0) {
-        if (line[0] == '\0') continue; // 跳过空行
+        if (line[0] == '\0') continue;
 
-        // 解析格式 "f:name=value"
         char *name_ptr, *val_ptr;
         
-        // 格式校验
         if (line[1] != ':' || (name_ptr = &line[2]) == NULL) continue;
         
         val_ptr = strchr(name_ptr, '=');
         if (val_ptr == NULL) continue;
         
-        *val_ptr = '\0'; // 将'='替换为'\0'，从而截断变量名
-        val_ptr++;       // 将指针移动到值的起始位置
+        *val_ptr = '\0';
+        val_ptr++;
         
-        // 为加载的变量寻找一个空槽位
         struct Var* v = find_free_var_slot();
         if (v == NULL) {
             printf("shell: warning: environment variable space is full, cannot load more.\n");
@@ -841,7 +853,7 @@ void load_environment() {
         }
 
         v->in_use = 1;
-        v->is_exported = 1; // 继承来的变量默认也是可导出的
+        v->is_exported = 1;
         v->is_readonly = (line[0] == 'r');
         
         safe_strncpy(v->name, name_ptr, VAR_MAX_NAME_LEN + 1);
@@ -854,21 +866,31 @@ void load_environment() {
 int readline_from_fd(int fd, char *buf, int size) {
     int i = 0; char c = 0;
     while (i < size - 1) {
-        if (read(fd, &c, 1) != 1) { i = -1; break; }
+        if (read(fd, &c, 1) != 1) {
+             if (i == 0) return -1; // EOF or error
+             else break; 
+        }
         if (c == '\n' || c == '\r') break;
         buf[i++] = c;
     }
-    if (i >= 0) buf[i] = '\0';
+    buf[i] = '\0';
     return i;
 }
 void load_history() {
     int fd = open("/.mos_history", O_RDONLY);
     if (fd < 0) return;
+    
     history_count = 0;
+    history_start = 0;
+    
     while(history_count < HISTFILESIZE) {
-        if (readline_from_fd(fd, history[history_count], BUF_MAX) < 0) break;
-        if (history[history_count][0] != '\0') history_count++;
-        else break;
+        if (readline_from_fd(fd, history[history_count], BUF_MAX) >= 0) {
+             if (history[history_count][0] != '\0') {
+                history_count++;
+             }
+        } else {
+            break; // EOF
+        }
     }
     close(fd);
 }
