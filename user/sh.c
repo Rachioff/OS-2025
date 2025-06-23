@@ -315,6 +315,8 @@ int run_cmd(struct cmd* cmd) {
         if (strcmp(ecmd->argv[0], "unset") == 0) return handle_unset(ecmd->argc, ecmd->argv);
         if (strcmp(ecmd->argv[0], "history") == 0) return handle_history(ecmd->argc, ecmd->argv);
 
+        save_environment();
+
         // --- Replace the old spawn logic with the following ---
         char path_to_try[MAXPATHLEN];
         int spawn_status;
@@ -442,7 +444,6 @@ void handle_backticks(char* dst, const char* src, int dst_size) {
         }
         
         close(p[1]);
-        wait(pid);
         
         char c;
         int last_char_is_space = 0;
@@ -461,6 +462,7 @@ void handle_backticks(char* dst, const char* src, int dst_size) {
         if (d > dst && *(d-1) == ' ') d--; // Trim trailing space
         
         close(p[0]);
+        wait(pid);
     }
     *d = '\0';
 }
@@ -492,6 +494,8 @@ int main() {
         vars[i].in_use = 0;
     }
 
+    load_environment();
+
     int fd_cwd;
     if ((fd_cwd = open("/.cwd", O_RDONLY)) >= 0) {
         char cwd_buf[MAXPATHLEN];
@@ -505,7 +509,9 @@ int main() {
 
     load_history();
 
-    printf("\n"); 
+    printf("\n:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\n");
+	printf("::               MOS Shell (Challenge Edition)             ::\n");
+	printf(":::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\n");
 
     for (;;) {
         reset_pools();
@@ -771,6 +777,80 @@ int handle_history(int argc, char **argv) {
     for (int i = 0; i < history_count; i++) printf("  %d\t%s\n", i + 1, history[i]);
     return 0;
 }
+
+void save_environment() {
+    int fd;
+    // 打开环境变量文件，如果不存在则创建，如果存在则清空
+    if ((fd = open("/.mos_env", O_WRONLY | O_CREAT | O_TRUNC)) < 0) {
+        return; // 打开文件失败，无法保存环境变量
+    }
+
+    for (int i = 0; i < MAX_VARS; i++) {
+        // 只保存那些正在使用且被标记为可导出的变量
+        if (vars[i].in_use && vars[i].is_exported) {
+            // 预留足够的空间: "r:name=value\n\0"
+            char line_buf[VAR_MAX_NAME_LEN + VAR_MAX_VALUE_LEN + 4];
+            
+            // 格式化输出: 第一个字符表示是否只读 ('r' 或 'n')
+            line_buf[0] = vars[i].is_readonly ? 'r' : 'n';
+            line_buf[1] = ':';
+            line_buf[2] = '\0';
+            
+            // 拼接变量名、等号和值
+            strcat(line_buf, vars[i].name);
+            strcat(line_buf, "=");
+            strcat(line_buf, vars[i].value);
+            strcat(line_buf, "\n");
+            
+            // 写入文件
+            write(fd, line_buf, strlen(line_buf));
+        }
+    }
+    close(fd);
+}
+
+void load_environment() {
+    int fd;
+    // 只读方式打开环境变量文件
+    if ((fd = open("/.mos_env", O_RDONLY)) < 0) {
+        return; // 文件不存在，说明没有可加载的环境变量
+    }
+    
+    char line[BUF_MAX];
+    // 使用现有的 readline_from_fd 逐行读取
+    while (readline_from_fd(fd, line, sizeof(line)) >= 0) {
+        if (line[0] == '\0') continue; // 跳过空行
+
+        // 解析格式 "f:name=value"
+        char *name_ptr, *val_ptr;
+        
+        // 格式校验
+        if (line[1] != ':' || (name_ptr = &line[2]) == NULL) continue;
+        
+        val_ptr = strchr(name_ptr, '=');
+        if (val_ptr == NULL) continue;
+        
+        *val_ptr = '\0'; // 将'='替换为'\0'，从而截断变量名
+        val_ptr++;       // 将指针移动到值的起始位置
+        
+        // 为加载的变量寻找一个空槽位
+        struct Var* v = find_free_var_slot();
+        if (v == NULL) {
+            printf("shell: warning: environment variable space is full, cannot load more.\n");
+            break; 
+        }
+
+        v->in_use = 1;
+        v->is_exported = 1; // 继承来的变量默认也是可导出的
+        v->is_readonly = (line[0] == 'r');
+        
+        safe_strncpy(v->name, name_ptr, VAR_MAX_NAME_LEN + 1);
+        safe_strncpy(v->value, val_ptr, VAR_MAX_VALUE_LEN + 1);
+    }
+    
+    close(fd);
+}
+
 int readline_from_fd(int fd, char *buf, int size) {
     int i = 0; char c = 0;
     while (i < size - 1) {
